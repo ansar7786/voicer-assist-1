@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 
 export default function Live() {
   const location = useLocation();
-  const [status, setStatus] = useState("disconnected"); // disconnected, connecting, listening, speaking, thinking, error
+  const [status, setStatus] = useState("disconnected"); // disconnected, connecting, listening, speaking, thinking, reconnecting, error
   const [errorMsg, setErrorMsg] = useState("");
   const [transcripts, setTranscripts] = useState([]);
   const [toolCalls, setToolCalls] = useState([]);
@@ -28,13 +28,46 @@ export default function Live() {
       try {
         src.stop();
       } catch (e) {
-        // ignore already stopped
+        // already stopped
       }
     });
     activeSourcesRef.current = [];
     if (playbackContextRef.current) {
       nextPlayTimeRef.current = playbackContextRef.current.currentTime;
     }
+  };
+
+  const mergeTranscriptTurn = (role, newText, isFinal) => {
+    const timeStr = new Date().toLocaleTimeString();
+    setTranscripts((prev) => {
+      if (prev.length === 0) {
+        return [{ id: Math.random().toString(36).substring(2, 9), role, text: newText.trim(), final: isFinal, time: timeStr }];
+      }
+      const last = prev[prev.length - 1];
+      if (last.role === role && !last.final) {
+        const mergedText = newText.startsWith(last.text)
+          ? newText
+          : `${last.text} ${newText}`.trim();
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...last,
+          text: mergedText,
+          final: isFinal,
+        };
+        return updated;
+      } else {
+        return [...prev, { id: Math.random().toString(36).substring(2, 9), role, text: newText.trim(), final: isFinal, time: timeStr }];
+      }
+    });
+  };
+
+  const finalizeLatestTurn = () => {
+    setTranscripts((prev) => {
+      if (prev.length === 0) return prev;
+      const updated = [...prev];
+      updated[updated.length - 1] = { ...updated[updated.length - 1], final: true };
+      return updated;
+    });
   };
 
   const startSession = async () => {
@@ -52,7 +85,7 @@ export default function Live() {
       });
       mediaStreamRef.current = stream;
 
-      // 2. Capture AudioContext & AudioWorklet
+      // 2. Capture AudioContext & AudioWorklet (16 kHz downsampling)
       const captureCtx = new (window.AudioContext || window.webkitAudioContext)();
       captureContextRef.current = captureCtx;
       await captureCtx.audioWorklet.addModule("/pcm-worklet-processor.js");
@@ -67,7 +100,7 @@ export default function Live() {
       playbackContextRef.current = playbackCtx;
       nextPlayTimeRef.current = playbackCtx.currentTime;
 
-      // 4. WebSocket connection to backend (proxied by Vite or direct)
+      // 4. WebSocket connection to backend
       const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const wsUrl = `${wsProtocol}//${window.location.host}/ws/live`;
 
@@ -82,39 +115,32 @@ export default function Live() {
       };
 
       ws.onopen = () => {
-        console.log("WebSocket connected to", wsUrl);
         const languageHint = location.state?.languageHint || "te";
         ws.send(JSON.stringify({ type: "start", language_hint: languageHint }));
       };
 
       ws.onmessage = (event) => {
-        // Binary frame = 24 kHz PCM16 audio from Gemini
+        // Binary frame = 24 kHz PCM16 audio from Gemini Live
         if (event.data instanceof ArrayBuffer) {
           handleIncomingAudio(event.data);
           return;
         }
 
-        // Text frame = JSON control/transcript message
+        // Text frame = JSON control / transcript message
         try {
           const data = JSON.parse(event.data);
 
           if (data.type === "state") {
             setStatus(data.value);
           } else if (data.type === "interrupted") {
+            // Server signaled interruption: clear browser playback queue immediately (barge-in)
             stopAudio();
             setStatus("listening");
           } else if (data.type === "transcript") {
-            const timeStr = new Date().toLocaleTimeString();
-            setTranscripts((prev) => [
-              ...prev,
-              {
-                id: Math.random().toString(36).substring(2, 9),
-                role: data.role,
-                text: data.text,
-                final: data.final,
-                time: timeStr,
-              },
-            ]);
+            mergeTranscriptTurn(data.role, data.text, Boolean(data.final));
+          } else if (data.type === "turn_complete") {
+            finalizeLatestTurn();
+            setStatus("listening");
           } else if (data.type === "tool_call") {
             const timeStr = new Date().toLocaleTimeString();
             setToolCalls((prev) => [
@@ -142,7 +168,6 @@ export default function Live() {
       };
 
       ws.onclose = () => {
-        console.log("WebSocket closed");
         if (status !== "error") {
           setStatus("disconnected");
         }
@@ -162,13 +187,11 @@ export default function Live() {
     const pcm16 = new Int16Array(arrayBuffer);
     if (pcm16.length === 0) return;
 
-    // Convert PCM16 to Float32 [-1.0, 1.0]
     const float32 = new Float32Array(pcm16.length);
     for (let i = 0; i < pcm16.length; i++) {
       float32[i] = pcm16[i] / 32768.0;
     }
 
-    // Output from Gemini Live is 24,000 Hz mono
     const audioBuffer = playbackCtx.createBuffer(1, float32.length, 24000);
     audioBuffer.getChannelData(0).set(float32);
 
@@ -178,7 +201,7 @@ export default function Live() {
 
     const currentTime = playbackCtx.currentTime;
     if (nextPlayTimeRef.current < currentTime) {
-      nextPlayTimeRef.current = currentTime + 0.05; // 50ms buffer
+      nextPlayTimeRef.current = currentTime + 0.05;
     }
 
     source.start(nextPlayTimeRef.current);
@@ -228,102 +251,154 @@ export default function Live() {
     if (!typedMessage.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       return;
     }
-    wsRef.current.send(JSON.stringify({ type: "text", text: typedMessage }));
-    setTranscripts((prev) => [
-      ...prev,
-      {
-        id: Math.random().toString(36).substring(2, 9),
-        role: "user",
-        text: typedMessage,
-        final: true,
-        time: new Date().toLocaleTimeString(),
-      },
-    ]);
+    const msg = typedMessage.trim();
+    wsRef.current.send(JSON.stringify({ type: "text", text: msg }));
+    mergeTranscriptTurn("user", msg, true);
     setTypedMessage("");
   };
 
+  const isConnected = status !== "disconnected" && status !== "error";
+
+  const getStatusColor = () => {
+    switch (status) {
+      case "listening":
+        return "#10b981"; // Emerald green
+      case "speaking":
+        return "#3b82f6"; // Blue
+      case "thinking":
+        return "#8b5cf6"; // Purple
+      case "connecting":
+        return "#f59e0b"; // Amber
+      case "reconnecting":
+        return "#ea580c"; // Orange
+      case "error":
+        return "#ef4444"; // Red
+      default:
+        return "#94a3b8"; // Slate
+    }
+  };
+
+  const getStatusLabel = () => {
+    switch (status) {
+      case "listening":
+        return "Listening to your voice";
+      case "speaking":
+        return "Assistant is speaking";
+      case "thinking":
+        return "Processing & reasoning";
+      case "connecting":
+        return "Connecting to Gemini Live...";
+      case "reconnecting":
+        return "Reconnecting session...";
+      case "error":
+        return "Connection Error";
+      default:
+        return "Ready to Connect";
+    }
+  };
+
   return (
-    <div style={{ maxWidth: 880, margin: "1.5rem auto", padding: "0 1rem", fontFamily: "sans-serif" }}>
-      <h2 style={{ margin: "0 0 0.5rem 0", color: "#0f172a" }}>Live Voice Console</h2>
-      <p style={{ color: "#64748b", margin: "0 0 1.5rem 0" }}>
-        Live Gemini Audio Session (16 kHz PCM Mic In &rarr; Gemini Live &rarr; 24 kHz PCM Audio Out)
-      </p>
+    <div style={{ maxWidth: 900, margin: "1.5rem auto", padding: "0 1rem", fontFamily: "sans-serif" }}>
+      {/* Voice Panel with Large Mic State Indicator */}
+      <div
+        style={{
+          border: "1px solid #e2e8f0",
+          borderRadius: "12px",
+          padding: "2rem",
+          backgroundColor: "#ffffff",
+          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)",
+          marginBottom: "1.5rem",
+          textAlign: "center",
+        }}
+      >
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "1rem" }}>
+          {/* Large circular mic indicator */}
+          <div
+            style={{
+              width: 100,
+              height: 100,
+              borderRadius: "50%",
+              backgroundColor: `${getStatusColor()}20`,
+              border: `4px solid ${getStatusColor()}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              transition: "all 0.3s ease",
+              boxShadow: isConnected ? `0 0 20px ${getStatusColor()}40` : "none",
+            }}
+          >
+            <span style={{ fontSize: "2.5rem" }}>
+              {status === "speaking" ? "🔊" : status === "thinking" ? "⚙️" : status === "reconnecting" ? "🔄" : "🎙️"}
+            </span>
+          </div>
 
-      {/* Connection Controls & State Indicator */}
-      <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginBottom: "1.5rem" }}>
-        {status === "disconnected" || status === "error" ? (
-          <button
-            onClick={startSession}
-            style={{
-              padding: "0.6rem 1.2rem",
-              fontSize: "1rem",
-              fontWeight: "bold",
-              cursor: "pointer",
-              borderRadius: "6px",
-              border: "none",
-              backgroundColor: "#2563eb",
-              color: "#ffffff",
-            }}
-          >
-            Connect &amp; Start Mic
-          </button>
-        ) : (
-          <button
-            onClick={stopSession}
-            style={{
-              padding: "0.6rem 1.2rem",
-              fontSize: "1rem",
-              fontWeight: "bold",
-              cursor: "pointer",
-              borderRadius: "6px",
-              border: "none",
-              backgroundColor: "#dc2626",
-              color: "#ffffff",
-            }}
-          >
-            Disconnect &amp; Stop Mic
-          </button>
-        )}
+          <div>
+            <h3 style={{ margin: "0.25rem 0", color: "#0f172a", fontSize: "1.35rem" }}>
+              {getStatusLabel()}
+            </h3>
+            <p style={{ margin: 0, color: "#64748b", fontSize: "0.9rem" }}>
+              Telugu &bull; Hindi &bull; English &bull; Natural Code-Switching
+            </p>
+          </div>
 
-        {/* State Indicator */}
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <strong>State:</strong>
-          <span
-            style={{
-              display: "inline-block",
-              padding: "0.3rem 0.8rem",
-              borderRadius: "4px",
-              fontWeight: "bold",
-              textTransform: "uppercase",
-              fontSize: "0.85rem",
-              backgroundColor:
-                status === "listening"
-                  ? "#d4edda"
-                  : status === "speaking"
-                  ? "#cce5ff"
-                  : status === "connecting"
-                  ? "#fff3cd"
-                  : status === "thinking"
-                  ? "#e2e3e5"
-                  : status === "error"
-                  ? "#f8d7da"
-                  : "#eee",
-              color:
-                status === "listening"
-                  ? "#155724"
-                  : status === "speaking"
-                  ? "#004085"
-                  : status === "connecting"
-                  ? "#856404"
-                  : status === "thinking"
-                  ? "#383d41"
-                  : status === "error"
-                  ? "#721c24"
-                  : "#333",
-            }}
-          >
-            {status}
-          </span>
+          {/* Action Buttons: Connect / Stop Button */}
+          <div style={{ display: "flex", gap: "1rem", marginTop: "0.5rem" }}>
+            {!isConnected ? (
+              <button
+                onClick={startSession}
+                style={{
+                  padding: "0.75rem 1.8rem",
+                  fontSize: "1rem",
+                  fontWeight: "bold",
+                  cursor: "pointer",
+                  borderRadius: "8px",
+                  border: "none",
+                  backgroundColor: "#2563eb",
+                  color: "#ffffff",
+                  boxShadow: "0 2px 4px rgba(37,99,235,0.2)",
+                }}
+              >
+                🎙️ Start Live Voice
+              </button>
+            ) : (
+              <button
+                onClick={stopSession}
+                style={{
+                  padding: "0.75rem 1.8rem",
+                  fontSize: "1rem",
+                  fontWeight: "bold",
+                  cursor: "pointer",
+                  borderRadius: "8px",
+                  border: "none",
+                  backgroundColor: "#dc2626",
+                  color: "#ffffff",
+                  boxShadow: "0 2px 4px rgba(220,38,38,0.2)",
+                }}
+              >
+                ⏹️ Stop Assistant
+              </button>
+            )}
+
+            <button
+              onClick={() => {
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({ type: "text", text: "Please call ping tool to test connection" }));
+                }
+              }}
+              disabled={!isConnected}
+              style={{
+                padding: "0.75rem 1.2rem",
+                fontSize: "0.95rem",
+                borderRadius: "8px",
+                border: "1px solid #cbd5e1",
+                backgroundColor: isConnected ? "#f8fafc" : "#e2e8f0",
+                color: isConnected ? "#334155" : "#94a3b8",
+                cursor: isConnected ? "pointer" : "not-allowed",
+              }}
+            >
+              Test Ping Tool
+            </button>
+          </div>
         </div>
       </div>
 
@@ -331,126 +406,141 @@ export default function Live() {
         <div
           style={{
             padding: "0.8rem",
-            marginBottom: "1rem",
-            backgroundColor: "#f8d7da",
-            color: "#721c24",
-            border: "1px solid #f5c6cb",
-            borderRadius: "4px",
+            marginBottom: "1.5rem",
+            backgroundColor: "#fef2f2",
+            color: "#991b1b",
+            border: "1px solid #fecaca",
+            borderRadius: "6px",
           }}
         >
           <strong>Error:</strong> {errorMsg}
         </div>
       )}
 
-      {/* Dummy Tool (ping) Section */}
-      <div
-        style={{
-          border: "1px solid #e2e8f0",
-          borderRadius: "6px",
-          padding: "1rem",
-          marginBottom: "1.5rem",
-          backgroundColor: "#f8fafc",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ fontSize: "1.1rem", margin: 0, color: "#1e293b" }}>Registered Tool: ping</h3>
-          <button
-            onClick={() => {
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: "text", text: "Please call the ping tool with message test" }));
-              }
-            }}
-            disabled={status !== "listening" && status !== "speaking"}
-            style={{ padding: "0.4rem 0.8rem", cursor: "pointer", borderRadius: "4px" }}
-          >
-            Trigger ping tool via text
-          </button>
-        </div>
-        <p style={{ fontSize: "0.85rem", color: "#64748b", margin: "0.5rem 0" }}>
-          Speak <em>&quot;Please ping&quot;</em> or <em>&quot;Test ping tool&quot;</em> into your mic, or use the trigger button above.
-        </p>
-        <div style={{ marginTop: "0.5rem" }}>
-          <strong>Tool Call Events ({toolCalls.length}):</strong>
-          {toolCalls.length === 0 ? (
-            <p style={{ color: "#94a3b8", fontStyle: "italic", margin: "0.25rem 0" }}>
-              No tool calls yet. Ask Gemini to call &apos;ping&apos;.
-            </p>
-          ) : (
-            <ul style={{ margin: "0.5rem 0", paddingLeft: "1.2rem" }}>
-              {toolCalls.map((tc) => (
-                <li key={tc.id} style={{ margin: "0.25rem 0" }}>
-                  <strong>[{tc.time}] Tool Called:</strong> <code>{tc.name}</code> |{" "}
-                  <strong>Args:</strong> <code>{JSON.stringify(tc.args)}</code> &rarr; returned{" "}
-                  <span style={{ color: "#16a34a", fontWeight: "bold" }}>PONG</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-
-      {/* Live Input and Output Transcripts */}
-      <div
-        style={{
-          border: "1px solid #e2e8f0",
-          borderRadius: "6px",
-          padding: "1rem",
-          marginBottom: "1.5rem",
-          backgroundColor: "#ffffff",
-        }}
-      >
-        <h3 style={{ fontSize: "1.1rem", margin: "0 0 0.8rem 0", color: "#1e293b" }}>Live Transcripts</h3>
+      {/* Tool Call Events Card */}
+      {toolCalls.length > 0 && (
         <div
           style={{
-            height: "240px",
+            border: "1px solid #e2e8f0",
+            borderRadius: "8px",
+            padding: "1rem",
+            marginBottom: "1.5rem",
+            backgroundColor: "#f8fafc",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h4 style={{ margin: 0, color: "#1e293b" }}>Tool Call Activity</h4>
+            <span style={{ fontSize: "0.8rem", color: "#64748b" }}>{toolCalls.length} call(s)</span>
+          </div>
+          <ul style={{ margin: "0.5rem 0 0 0", paddingLeft: "1.2rem" }}>
+            {toolCalls.map((tc) => (
+              <li key={tc.id} style={{ margin: "0.25rem 0", fontSize: "0.9rem" }}>
+                <strong>[{tc.time}] {tc.name}</strong> &rarr; returned{" "}
+                <span style={{ color: "#16a34a", fontWeight: "bold" }}>PONG</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Live Transcripts: Single Line Per Turn */}
+      <div
+        style={{
+          border: "1px solid #e2e8f0",
+          borderRadius: "8px",
+          padding: "1.25rem",
+          marginBottom: "1.5rem",
+          backgroundColor: "#ffffff",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+          <h3 style={{ fontSize: "1.1rem", margin: 0, color: "#0f172a" }}>Live Conversation Transcript</h3>
+          <span style={{ fontSize: "0.8rem", color: "#64748b" }}>One line per turn</span>
+        </div>
+
+        <div
+          style={{
+            minHeight: "220px",
+            maxHeight: "360px",
             overflowY: "auto",
             backgroundColor: "#f8fafc",
             border: "1px solid #e2e8f0",
-            padding: "0.75rem",
-            borderRadius: "4px",
+            padding: "1rem",
+            borderRadius: "6px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.75rem",
           }}
         >
           {transcripts.length === 0 ? (
-            <p style={{ color: "#94a3b8", fontStyle: "italic", margin: 0 }}>
-              Transcripts will appear here when you or the assistant speak.
+            <p style={{ color: "#94a3b8", fontStyle: "italic", margin: "auto", textAlign: "center" }}>
+              Spoken conversation transcripts will appear here turn-by-turn.
             </p>
           ) : (
             transcripts.map((t) => (
               <div
                 key={t.id}
                 style={{
-                  marginBottom: "0.5rem",
-                  color: t.role === "user" ? "#1e40af" : "#166534",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: t.role === "user" ? "flex-end" : "flex-start",
                 }}
               >
-                <span style={{ fontSize: "0.8rem", color: "#94a3b8", marginRight: "0.5rem" }}>
-                  [{t.time}]
-                </span>
-                <strong>{t.role === "user" ? "You (Input):" : "Gemini (Output):"}</strong>{" "}
-                <span>{t.text}</span>
+                <div
+                  style={{
+                    maxWidth: "80%",
+                    padding: "0.6rem 0.9rem",
+                    borderRadius: "8px",
+                    backgroundColor: t.role === "user" ? "#dbeafe" : "#f1f5f9",
+                    color: t.role === "user" ? "#1e40af" : "#0f172a",
+                    border: t.role === "user" ? "1px solid #bfdbfe" : "1px solid #e2e8f0",
+                    fontSize: "0.95rem",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  <div style={{ fontSize: "0.75rem", color: "#64748b", marginBottom: "0.2rem" }}>
+                    <strong>{t.role === "user" ? "You" : "Assistant"}</strong> &bull; {t.time}
+                  </div>
+                  <div>{t.text}</div>
+                </div>
               </div>
             ))
           )}
         </div>
       </div>
 
-      {/* Typed Input Fallback */}
+      {/* Typed Input Form */}
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <input
           type="text"
           value={typedMessage}
-          placeholder="Type a message (e.g., 'Say hello in Telugu' or 'Ping')..."
+          placeholder="Type your message here (e.g. 'నేను కుట్టుపని నేర్చుకోవాలనుకుంటున్నాను' or 'Ping')..."
           onChange={(e) => setTypedMessage(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && sendTextTurn()}
-          disabled={status !== "listening" && status !== "speaking"}
-          style={{ flex: 1, padding: "0.5rem", fontSize: "0.95rem", borderRadius: "4px", border: "1px solid #cbd5e1" }}
+          disabled={!isConnected}
+          style={{
+            flex: 1,
+            padding: "0.6rem 0.9rem",
+            fontSize: "0.95rem",
+            borderRadius: "6px",
+            border: "1px solid #cbd5e1",
+          }}
         />
         <button
           onClick={sendTextTurn}
-          disabled={status !== "listening" && status !== "speaking"}
-          style={{ padding: "0.5rem 1rem", cursor: "pointer", borderRadius: "4px" }}
+          disabled={!isConnected || !typedMessage.trim()}
+          style={{
+            padding: "0.6rem 1.25rem",
+            fontWeight: "bold",
+            cursor: isConnected && typedMessage.trim() ? "pointer" : "not-allowed",
+            borderRadius: "6px",
+            border: "none",
+            backgroundColor: isConnected && typedMessage.trim() ? "#2563eb" : "#cbd5e1",
+            color: "#ffffff",
+          }}
         >
-          Send Text
+          Send
         </button>
       </div>
     </div>

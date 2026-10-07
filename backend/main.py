@@ -21,7 +21,7 @@ from backend.schema import (
 )
 from backend.engine import compute_pathways, recompute_pathways
 
-app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 2")
+app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,7 +53,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "phase": 2,
+        "phase": 3,
         "model": model,
         "has_api_key": bool(api_key),
         "db_initialized": db_ready,
