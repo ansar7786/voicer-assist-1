@@ -1,0 +1,8 @@
+id,name,block,trade,seats,next_batch_date,mode,is_sample
+TC_AP_01,PMKK Centre Anandapuram,Anandapuram,tailoring,30,2026-11-01,classroom,1
+TC_AP_02,Rural Skilling Hub Pendurthi,Pendurthi,tailoring,25,2026-10-25,hybrid,1
+TC_AP_03,Hospitality Institute Bheemili,Bheemunipatnam,catering,20,2026-11-10,residential,1
+TC_AP_04,Jan Shikshan Sansthan Anandapuram,Anandapuram,electrician,20,2026-11-15,classroom,1
+TC_AP_05,Green Energy Training Centre Pendurthi,Pendurthi,solar_technician,15,2026-12-01,classroom,1
+TC_AP_06,Community Development Centre Bheemili,Bheemunipatnam,beauty_wellness,25,2026-11-05,classroom,1
+TC_AP_07,Krishi Vigyan Kendra Anandapuram,Anandapuram,dairy_farming,30,2026-10-30,field,1

@@ -19,10 +19,10 @@ def get_gemini_api_key() -> str:
 
 def get_gemini_live_model() -> str:
     load_dotenv(dotenv_path=ENV_PATH)
-    return os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live").strip() or "gemini-3.8-live"
-
-GEMINI_API_KEY = get_gemini_api_key()
-GEMINI_LIVE_MODEL = get_gemini_live_model()
+    model = os.getenv("GEMINI_LIVE_MODEL", "").strip()
+    if not model:
+        raise ValueError("GEMINI_LIVE_MODEL environment variable is not set. Please set it in .env.")
+    return model
 
 def get_live_config() -> types.LiveConnectConfig:
     ping_tool = types.FunctionDeclaration(
@@ -60,7 +60,16 @@ def get_live_config() -> types.LiveConnectConfig:
 
 async def handle_live_session(websocket: WebSocket):
     api_key = get_gemini_api_key()
-    live_model = get_gemini_live_model()
+    try:
+        live_model = get_gemini_live_model()
+    except ValueError as e:
+        await websocket.send_json({
+            "type": "error",
+            "message": str(e),
+        })
+        await websocket.send_json({"type": "state", "value": "error"})
+        await websocket.close()
+        return
 
     if not api_key:
         await websocket.send_json({

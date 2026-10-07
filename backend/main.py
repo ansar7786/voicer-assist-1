@@ -12,7 +12,9 @@ from backend.live import (
 # Ensure project-root .env is loaded
 load_dotenv(dotenv_path=ENV_PATH)
 
-app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 0")
+from backend.db import get_db_connection, DB_PATH
+
+app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,11 +27,29 @@ app.add_middleware(
 @app.get("/api/health")
 def health_check():
     api_key = get_gemini_api_key()
+    try:
+        model = get_gemini_live_model()
+    except ValueError as e:
+        model = None
+
+    db_ready = False
+    try:
+        if DB_PATH.exists():
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM sqlite_master WHERE type='table'")
+            count = cur.fetchone()[0]
+            conn.close()
+            db_ready = count > 0
+    except Exception:
+        db_ready = False
+
     return {
         "status": "ok",
-        "phase": 0,
-        "model": get_gemini_live_model(),
+        "phase": 1,
+        "model": model,
         "has_api_key": bool(api_key),
+        "db_initialized": db_ready,
     }
 
 @app.websocket("/ws/live")

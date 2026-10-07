@@ -1,0 +1,8 @@
+id,trade,type,block,source_note,verified,is_sample
+OPP_01,tailoring,order,Anandapuram,SHG School Uniform Bulk Stitching Order,1,1
+OPP_02,tailoring,self,Pendurthi,Local Women Boutique Alteration Demand,1,1
+OPP_03,catering,wage,Bheemunipatnam,Hotel Ocean View Kitchen Helper Positions,1,1
+OPP_04,catering,wage,Anandapuram,Highway Dhaba Line Cook Requirement,1,1
+OPP_05,electrician,wage,Pendurthi,Residential Electrical Contractor Team,1,1
+OPP_06,beauty_wellness,self,Bheemunipatnam,Doorstep Bridal Grooming Network,1,1
+OPP_07,retail_sales,wage,Anandapuram,Supermarket Cashier & Sales Representative,1,1

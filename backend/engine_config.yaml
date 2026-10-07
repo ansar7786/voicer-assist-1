@@ -1,0 +1,14 @@
+# Engine weights and configuration for Pathway Ranking
+version: 1.0
+weights:
+  interest_match: 0.30
+  skill_match: 0.25
+  education_fit: 0.15
+  duration_fit: 0.10
+  local_demand: 0.10
+  asset_fit: 0.10
+
+thresholds:
+  max_pathways: 3
+  direct_skill_score: 1.0
+  adjacent_skill_score: 0.6
