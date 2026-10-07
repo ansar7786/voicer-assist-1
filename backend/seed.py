@@ -12,6 +12,8 @@ def seed_database():
     # 1. Seed nsqf_qualifications
     nsqf_csv = DATA_DIR / "nsqf_qualifications.csv"
     if nsqf_csv.exists():
+        cursor.execute("DROP TABLE IF EXISTS nsqf_qualifications")
+        init_db()
         with open(nsqf_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -19,8 +21,9 @@ def seed_database():
                 INSERT OR REPLACE INTO nsqf_qualifications (
                     id, trade, qualification_name, nsqf_level, entry_education,
                     duration_months, sector, self_employment_suitable, requires_travel,
-                    equipment_needed, route_type, source_url, source_note, last_verified, is_sample
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    equipment_needed, route_type, source_url, source_note, last_verified, is_sample,
+                    delivery_mode, equipment_obtainable
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     row["id"], row["trade"], row["qualification_name"],
                     int(row["nsqf_level"]), row["entry_education"],
@@ -28,7 +31,8 @@ def seed_database():
                     int(row["self_employment_suitable"]), int(row["requires_travel"]),
                     row.get("equipment_needed", ""), row["route_type"],
                     row.get("source_url", ""), row.get("source_note", ""),
-                    row.get("last_verified", ""), int(row["is_sample"])
+                    row.get("last_verified", ""), int(row["is_sample"]),
+                    row.get("delivery_mode", "either"), int(row.get("equipment_obtainable", 1))
                 ))
         print(f"Seeded nsqf_qualifications from {nsqf_csv.name}")
 

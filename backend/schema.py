@@ -46,6 +46,8 @@ class PathwaySchema(BaseModel):
     qualification: str
     nsqf_level: int
     duration_months: int
+    delivery_mode: str = "either"
+    equipment_obtainable: int = 1
     skill_gap: List[str] = Field(default_factory=list)
     nearest_centre: Optional[CentreInfoSchema] = None
     opportunity_status: str  # Exactly "No verified opportunity found" if none

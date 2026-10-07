@@ -1,12 +1,12 @@
-id,trade,qualification_name,nsqf_level,entry_education,duration_months,sector,self_employment_suitable,requires_travel,equipment_needed,route_type,source_url,source_note,last_verified,is_sample
-Q_TAILOR_01,tailoring,Self Employed Tailor,4,10th,3,Apparel Made-Ups & Home Furnishing,1,0,sewing machine,self,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_SEWING_02,tailoring,Sewing Machine Operator,3,8th,2,Apparel Made-Ups & Home Furnishing,0,1,none,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_EMBROID_03,tailoring,Hand Embroiderer,3,8th,2,Apparel Made-Ups & Home Furnishing,1,0,embroidery frame,both,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_CATERING_01,catering,Assistant Cook,3,8th,3,Tourism & Hospitality,0,1,kitchen tools,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_FOOD_02,catering,Food & Beverage Service Steward,4,10th,4,Tourism & Hospitality,0,1,none,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_CATERING_03,catering,Street Food Vendor,3,primary,1,Tourism & Hospitality,1,0,cooking cart,self,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_ELEC_01,electrician,Field Technician - Home Appliances,4,10th,4,Electronics,1,1,multimeter and toolkit,both,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_SOLAR_01,solar_technician,Solar PV Installer (Suryamitra),4,10th,3,Green Jobs,0,1,safety harness and tools,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_DAIRY_01,dairy_farming,Dairy Farmer / Entrepreneur,3,none,2,Agriculture,1,0,milking equipment,self,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_BEAUTY_01,beauty_wellness,Assistant Beauty Therapist,3,8th,3,Beauty & Wellness,1,0,basic salon kit,both,https://www.nqr.gov.in,TODO verify,2026-10-06,1
-Q_RETAIL_01,retail_sales,Retail Sales Associate,4,10th,3,Retail,0,1,none,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1
+id,trade,qualification_name,nsqf_level,entry_education,duration_months,sector,self_employment_suitable,requires_travel,equipment_needed,route_type,source_url,source_note,last_verified,is_sample,delivery_mode,equipment_obtainable
+Q_TAILOR_01,tailoring,Self Employed Tailor,4,10th,3,Apparel Made-Ups & Home Furnishing,1,0,sewing machine,self,https://www.nqr.gov.in,TODO verify,2026-10-06,1,home_based,1
+Q_SEWING_02,tailoring,Sewing Machine Operator,3,8th,2,Apparel Made-Ups & Home Furnishing,0,1,none,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1
+Q_EMBROID_03,tailoring,Hand Embroiderer,3,8th,2,Apparel Made-Ups & Home Furnishing,1,0,embroidery frame,both,https://www.nqr.gov.in,TODO verify,2026-10-06,1,home_based,1
+Q_CATERING_01,catering,Assistant Cook,3,8th,3,Tourism & Hospitality,0,1,kitchen tools,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1
+Q_FOOD_02,catering,Food & Beverage Service Steward,4,10th,4,Tourism & Hospitality,0,1,none,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1
+Q_CATERING_03,catering,Street Food Vendor,3,primary,1,Tourism & Hospitality,1,0,cooking cart,self,https://www.nqr.gov.in,TODO verify,2026-10-06,1,home_based,1
+Q_ELEC_01,electrician,Field Technician - Home Appliances,4,10th,4,Electronics,1,1,multimeter and toolkit,both,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1
+Q_SOLAR_01,solar_technician,Solar PV Installer (Suryamitra),4,10th,3,Green Jobs,0,1,safety harness and tools,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1
+Q_DAIRY_01,dairy_farming,Dairy Farmer / Entrepreneur,3,none,2,Agriculture,1,0,milking equipment,self,https://www.nqr.gov.in,TODO verify,2026-10-06,1,home_based,1
+Q_BEAUTY_01,beauty_wellness,Assistant Beauty Therapist,3,8th,3,Beauty & Wellness,1,0,basic salon kit,both,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1
+Q_RETAIL_01,retail_sales,Retail Sales Associate,4,10th,3,Retail,0,1,none,wage,https://www.nqr.gov.in,TODO verify,2026-10-06,1,centre_based,1

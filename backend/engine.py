@@ -1,13 +1,22 @@
 """
 Pure Python deterministic rule-based livelihood & skilling pathway engine for SIH26097.
-Adheres strictly to PRD specifications:
+Adheres strictly to PRD and Phase 2.1 specifications:
 - Pure Python, zero network access, deterministic execution.
 - Hard filters (FR-30) with human-readable rejection reasons for every excluded candidate.
+- Delivery mode (home_based / centre_based / either) and equipment_obtainable filtering.
+- Mobility filtering on training delivery:
+  - home_only & within_village: allow only home_based or either qualifications.
+  - within_block: requires a training centre for that trade in candidate's location_block.
+  - anywhere: allows any centre in district.
+- Minimum relevance rule: Low interest AND Low skill qualifications are excluded (allowing < 3 results).
 - Factor labels (FR-31) High / Medium / Low / Unknown.
+  - local_demand returns Unknown with "No demand data available".
 - Deterministic ranking (FR-32) using config weights; ZERO numeric scores in output.
 - Top 3 feasible pathways output (FR-33).
-- Opportunity honesty (FR-34): exactly "No verified opportunity found" if none exists.
-- Recompute with diff (FR-35): added, removed, kept items with reasons.
+- Opportunity honesty (FR-34): "Sample opportunity: …" when is_sample is true, "Verified: …" only for verified non-sample, exactly "No verified opportunity found" if none exists.
+- Recompute with diff (FR-35):
+  - Items newly in top 3 state: "Moved into your top 3 because <removed pathway> no longer fits".
+  - Kept items state the actual reason they stay feasible (not generic).
 - No-result state (FR-38): complete reason listing when no pathway qualifies.
 """
 import os
@@ -52,6 +61,7 @@ def load_engine_config() -> Dict[str, Any]:
             "asset_fit": 0.10,
         },
         "thresholds": {"max_pathways": 3, "direct_skill_score": 1.0, "adjacent_skill_score": 0.6},
+        "minimum_relevance": {"exclude_low_interest_and_low_skill": True},
         "education_levels": {
             "none": 0, "primary": 1, "8th": 2, "10th": 3, "12th": 4, "ITI": 5, "graduate": 6
         },
@@ -83,9 +93,11 @@ def check_hard_filters(
     profile: ProfileSchema,
     constraints: Optional[ConstraintSchema],
     edu_levels: Dict[str, int],
+    training_centres: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
-    Evaluate hard filters (FR-30). Returns rejection reason string if excluded, else None.
+    Evaluate hard filters (FR-30) including delivery mode and training mobility.
+    Returns rejection reason string if excluded, else None.
     """
     # 1. Effective constraints (explicit constraints override profile)
     effective_max_months = None
@@ -116,10 +128,33 @@ def check_hard_filters(
         candidate_label = candidate_edu if candidate_edu != "none" else "no formal"
         return f"Requires at least {entry_edu} education; candidate has {candidate_label}"
 
-    # 3. Mobility Hard Filter
+    # 3. Mobility Hard Filter (filters on training delivery & job travel)
+    delivery_mode = qual.get("delivery_mode", "either").lower()
     requires_travel = int(qual.get("requires_travel", 0))
-    if effective_mobility == "home_only" and requires_travel == 1:
-        return "Requires travel to a centre or workplace, but candidate is restricted to home only"
+
+    if effective_mobility in ["home_only", "within_village"]:
+        mob_label = "home only" if effective_mobility == "home_only" else "within village only"
+        if delivery_mode == "centre_based":
+            return f"Requires centre-based training, but candidate is restricted to {mob_label}"
+        if requires_travel == 1:
+            return f"Requires travel for employment, but candidate is restricted to {mob_label}"
+    elif effective_mobility == "within_block":
+        user_block = profile.location_block
+        if not user_block:
+            if delivery_mode == "centre_based":
+                return "Requires centre-based training in user's block, but no location block was provided"
+        else:
+            centres = training_centres or []
+            has_centre = any(
+                tc.get("trade") == qual.get("trade")
+                and tc.get("block", "").strip().lower() == user_block.strip().lower()
+                for tc in centres
+            )
+            if not has_centre and delivery_mode == "centre_based":
+                return f"Requires a training centre in {user_block} for this trade, but none is available"
+    elif effective_mobility == "anywhere":
+        # Allows any centre in district
+        pass
 
     # 4. Duration Hard Filter
     duration = int(qual.get("duration_months", 0))
@@ -163,6 +198,8 @@ def compute_pathways(
 
     weights = config.get("weights", {})
     thresholds = config.get("thresholds", {})
+    min_relevance_cfg = config.get("minimum_relevance", {})
+    exclude_low_rel = min_relevance_cfg.get("exclude_low_interest_and_low_skill", True)
     edu_levels = config.get("education_levels", {
         "none": 0, "primary": 1, "8th": 2, "10th": 3, "12th": 4, "ITI": 5, "graduate": 6
     })
@@ -180,7 +217,9 @@ def compute_pathways(
 
     # 1. Hard Filtering
     for qual in qualifications:
-        rejection_reason = check_hard_filters(qual, profile, constraints, edu_levels)
+        rejection_reason = check_hard_filters(
+            qual, profile, constraints, edu_levels, training_centres=training_centres
+        )
         if rejection_reason:
             excluded_pathways.append(
                 ExcludedPathwaySchema(
@@ -193,15 +232,6 @@ def compute_pathways(
         else:
             passed_qualifications.append(qual)
 
-    # If no pathways passed, return no-result state (FR-38)
-    if not passed_qualifications:
-        no_result_reasons = sorted(list({ex.reason for ex in excluded_pathways}))
-        return PathwaysResultSchema(
-            pathways=[],
-            excluded=excluded_pathways,
-            no_result_reasons=no_result_reasons,
-        )
-
     # 2. Ranking & Factor Formulation (FR-31, FR-32)
     scored_candidates = []
 
@@ -213,6 +243,8 @@ def compute_pathways(
         entry_edu = normalize_education(qual.get("entry_education", "none"))
         entry_edu_val = edu_levels.get(entry_edu, 0)
         equipment_needed = qual.get("equipment_needed", "").strip()
+        delivery_mode = qual.get("delivery_mode", "either")
+        equipment_obtainable = int(qual.get("equipment_obtainable", 1))
 
         # A. Interest match
         if not has_interests_stated:
@@ -252,6 +284,18 @@ def compute_pathways(
             skill_label = "Low"
             skill_reason = "New domain; foundational training needed"
 
+        # Minimum relevance check: Low interest AND Low skill -> exclude
+        if exclude_low_rel and interest_label == "Low" and skill_label == "Low":
+            excluded_pathways.append(
+                ExcludedPathwaySchema(
+                    id=q_id,
+                    name=q_name,
+                    trade=trade,
+                    reason="Low interest match and no related skill match; does not meet minimum relevance threshold",
+                )
+            )
+            continue
+
         # C. Education fit
         if candidate_edu_val > entry_edu_val:
             edu_score = 1.0
@@ -280,29 +324,10 @@ def compute_pathways(
             duration_label = "Medium"
             duration_reason = f"Course duration is {duration} months"
 
-        # E. Local demand
-        loc_block = profile.location_block
-        block_centres = [
-            tc for tc in training_centres
-            if tc.get("trade") == trade and (not loc_block or tc.get("block") == loc_block)
-        ]
-        block_opps = [
-            opp for opp in opportunities
-            if opp.get("trade") == trade and (not loc_block or opp.get("block") == loc_block)
-        ]
-
-        if loc_block and (block_centres or block_opps):
-            demand_score = 1.0
-            demand_label = "High"
-            demand_reason = f"Local training or opportunity available in {loc_block}"
-        elif block_centres or block_opps or any(tc.get("trade") == trade for tc in training_centres):
-            demand_score = 0.7
-            demand_label = "Medium"
-            demand_reason = "District-level training or market availability"
-        else:
-            demand_score = 0.3
-            demand_label = "Low"
-            demand_reason = "Limited local skilling infrastructure"
+        # E. Local demand (Returns Unknown with "No demand data available" until real data exists)
+        demand_score = 0.5
+        demand_label = "Unknown"
+        demand_reason = "No demand data available"
 
         # F. Asset fit
         if equipment_needed and equipment_needed.lower() != "none":
@@ -344,10 +369,19 @@ def compute_pathways(
         ]
 
         # Opportunity honesty (FR-34)
-        trade_opps = [opp for opp in opportunities if opp.get("trade") == trade and int(opp.get("verified", 0)) == 1]
+        trade_opps = [opp for opp in opportunities if opp.get("trade") == trade]
         if trade_opps:
             first_opp = trade_opps[0]
-            opportunity_status = f"Verified: {first_opp.get('source_note', 'Available')} in {first_opp.get('block', 'district')}"
+            is_sample = int(first_opp.get("is_sample", 0)) == 1
+            is_verified = int(first_opp.get("verified", 0)) == 1
+            note = first_opp.get("source_note", "Available opportunity")
+            block = first_opp.get("block", "district")
+            if is_sample:
+                opportunity_status = f"Sample opportunity: {note} in {block}"
+            elif is_verified:
+                opportunity_status = f"Verified: {note} in {block}"
+            else:
+                opportunity_status = "No verified opportunity found"
         else:
             opportunity_status = "No verified opportunity found"
 
@@ -355,7 +389,7 @@ def compute_pathways(
         centres_for_trade = [tc for tc in training_centres if tc.get("trade") == trade]
         nearest_centre = None
         if centres_for_trade:
-            # Match candidate block if possible
+            loc_block = profile.location_block
             matched_c = next((c for c in centres_for_trade if loc_block and c.get("block") == loc_block), centres_for_trade[0])
             nearest_centre = CentreInfoSchema(
                 name=matched_c["name"],
@@ -379,6 +413,8 @@ def compute_pathways(
             qualification=q_name,
             nsqf_level=int(qual.get("nsqf_level", 3)),
             duration_months=duration,
+            delivery_mode=delivery_mode,
+            equipment_obtainable=equipment_obtainable,
             skill_gap=missing_skills,
             nearest_centre=nearest_centre,
             opportunity_status=opportunity_status,
@@ -395,12 +431,16 @@ def compute_pathways(
             "id": q_id,
         })
 
+    # If no pathways passed both hard filters and minimum relevance, return no-result state (FR-38)
+    if not scored_candidates:
+        no_result_reasons = sorted(list({ex.reason for ex in excluded_pathways}))
+        return PathwaysResultSchema(
+            pathways=[],
+            excluded=excluded_pathways,
+            no_result_reasons=no_result_reasons,
+        )
+
     # Deterministic tie-breaking sort:
-    # 1. composite_score descending
-    # 2. skill_score descending
-    # 3. duration ascending (shorter duration first)
-    # 4. trade ascending
-    # 5. id ascending
     scored_candidates.sort(
         key=lambda x: (
             -round(x["composite_score"], 4),
@@ -457,30 +497,57 @@ def recompute_pathways(
     )
 
     new_pathway_map = {p.id: p for p in result.pathways}
-    new_ids = set(new_pathway_map.keys())
-    old_ids = set(previous_pathway_ids)
+    new_ids = [p.id for p in result.pathways]
+    old_ids = list(previous_pathway_ids)
 
     # Excluded map for reasons
     excluded_map = {ex.id: ex for ex in result.excluded}
 
-    added = []
     removed = []
-    kept = []
-
-    for p_id in new_ids:
-        p = new_pathway_map[p_id]
-        if p_id in old_ids:
-            kept.append(DiffItemSchema(id=p.id, name=p.name, trade=p.trade, reason="Remains feasible and high-ranking"))
-        else:
-            added.append(DiffItemSchema(id=p.id, name=p.name, trade=p.trade, reason="Newly qualified under updated preferences"))
-
     for p_id in old_ids:
-        if p_id not in new_ids:
+        if p_id not in new_pathway_map:
             if p_id in excluded_map:
                 ex = excluded_map[p_id]
                 removed.append(DiffItemSchema(id=ex.id, name=ex.name, trade=ex.trade, reason=ex.reason))
             else:
                 removed.append(DiffItemSchema(id=p_id, name="Previous Pathway", trade="", reason="Excluded under updated constraints"))
+
+    removed_names = [r.name for r in removed]
+
+    added = []
+    kept = []
+
+    for p_id in new_ids:
+        p = new_pathway_map[p_id]
+        if p_id in old_ids:
+            # Replace the generic "kept" reason with the actual reason it stays feasible
+            reasons = []
+            if constraints and constraints.max_training_months is not None:
+                reasons.append(f"{p.duration_months} months course duration is within your {constraints.max_training_months} months limit")
+            elif profile.max_training_months is not None:
+                reasons.append(f"{p.duration_months} months course duration fits within your limit")
+
+            if constraints and constraints.mobility:
+                reasons.append(f"{p.delivery_mode.replace('_', ' ')} training fits your {constraints.mobility.replace('_', ' ')} preference")
+            elif profile.mobility:
+                reasons.append(f"{p.delivery_mode.replace('_', ' ')} training fits your {profile.mobility.replace('_', ' ')} preference")
+
+            if constraints and constraints.work_preference:
+                reasons.append(f"{p.route} route satisfies {constraints.work_preference} work preference")
+
+            if not reasons:
+                reasons.append(f"Meets all criteria and maintains strong relevance for {p.trade}")
+
+            kept_reason = "; ".join(reasons)
+            kept.append(DiffItemSchema(id=p.id, name=p.name, trade=p.trade, reason=kept_reason))
+        else:
+            # Newly entered top 3
+            if removed_names:
+                rem_str = ", ".join(removed_names)
+                added_reason = f"Moved into your top 3 because {rem_str} no longer fits"
+            else:
+                added_reason = "Newly entered your top 3 under updated preferences"
+            added.append(DiffItemSchema(id=p.id, name=p.name, trade=p.trade, reason=added_reason))
 
     return RecomputeResultSchema(
         pathways=result.pathways,

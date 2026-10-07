@@ -199,20 +199,20 @@ MOBILITY_SYNONYMS = {
         "ఇంటి వద్దే", "ఇంటి నుంచే", "ఇంట్లోనే", "ప్రయాణం చేయలేను", "బయటకు వెళ్లలేను",
         "घर से ही", "घर पर", "घर पर ही", "बाहर नहीं जा सकते", "यात्रा नहीं", "सफर नहीं"
     ],
-    "local_block": [
-        "local_block", "local", "nearby", "within block", "same village", "mandal",
-        "స్థానికంగా", "మా ఊరిలోనే", "మండలంలోనే", "దగ్గర్లోనే",
-        "आसपास", "गांव में", "ब्लॉक में", "पास में", "लोकल"
+    "within_village": [
+        "within_village", "village only", "village", "same village", "in village",
+        "ఊరిలోనే", "మా ఊరిలోనే", "సొంత ఊరు",
+        "गांव में", "गाँव में", "अपने गांव में"
     ],
-    "district": [
-        "district", "within district", "any block",
-        "జిల్లా", "జిల్లా పరిధిలో", "జిల్లాలో ఎక్కడైనా",
-        "जिले में", "पूरे जिले में", "जिला"
+    "within_block": [
+        "within_block", "local_block", "local", "nearby", "within block", "block", "mandal",
+        "స్థానికంగా", "మండలంలోనే", "మండలంలో", "దగ్గర్లోనే", "బ్లాక్",
+        "आसपास", "ब्लॉक में", "पास में", "लोकल", "प्रखंड"
     ],
-    "state": [
-        "state", "anywhere", "can travel anywhere",
-        "రాష్ట్రం", "ఎక్కడైనా", "ఎక్కడికైనా వెళ్తా",
-        "कहीं भी", "राज्य में", "बाहर भी जा सकते हैं"
+    "anywhere": [
+        "anywhere", "district", "state", "within district", "any block", "can travel anywhere",
+        "జిల్లా", "జిల్లా పరిధిలో", "జిల్లాలో ఎక్కడైనా", "రాష్ట్రం", "ఎక్కడైనా", "ఎక్కడికైనా వెళ్తా",
+        "जिले में", "पूरे जिले में", "जिला", "कहीं भी", "राज्य में", "बाहर भी जा सकते हैं"
     ]
 }
 
@@ -337,7 +337,7 @@ def normalize_mobility(term: Optional[str]) -> Optional[str]:
     cleaned = clean_input(term)
     if not cleaned:
         return None
-    for mob in ["home_only", "local_block", "district", "state"]:
+    for mob in ["home_only", "within_village", "within_block", "anywhere"]:
         if mob == cleaned:
             return mob
         for syn in MOBILITY_SYNONYMS.get(mob, []):

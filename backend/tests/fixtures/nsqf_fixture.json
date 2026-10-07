@@ -11,7 +11,9 @@
     "requires_travel": 0,
     "equipment_needed": "sewing machine",
     "route_type": "self",
-    "is_sample": 1
+    "is_sample": 1,
+    "delivery_mode": "home_based",
+    "equipment_obtainable": 1
   },
   {
     "id": "Q_SEWING_02",
@@ -25,7 +27,9 @@
     "requires_travel": 1,
     "equipment_needed": "none",
     "route_type": "wage",
-    "is_sample": 1
+    "is_sample": 1,
+    "delivery_mode": "centre_based",
+    "equipment_obtainable": 1
   },
   {
     "id": "Q_CATER_01",
@@ -39,7 +43,9 @@
     "requires_travel": 1,
     "equipment_needed": "kitchen tools",
     "route_type": "wage",
-    "is_sample": 1
+    "is_sample": 1,
+    "delivery_mode": "centre_based",
+    "equipment_obtainable": 1
   },
   {
     "id": "Q_STREET_FOOD",
@@ -53,7 +59,9 @@
     "requires_travel": 0,
     "equipment_needed": "cooking cart",
     "route_type": "self",
-    "is_sample": 1
+    "is_sample": 1,
+    "delivery_mode": "home_based",
+    "equipment_obtainable": 1
   },
   {
     "id": "Q_ELEC_01",
@@ -67,7 +75,9 @@
     "requires_travel": 1,
     "equipment_needed": "multimeter and toolkit",
     "route_type": "both",
-    "is_sample": 1
+    "is_sample": 1,
+    "delivery_mode": "centre_based",
+    "equipment_obtainable": 1
   },
   {
     "id": "Q_SOLAR_01",
@@ -81,6 +91,8 @@
     "requires_travel": 1,
     "equipment_needed": "safety harness",
     "route_type": "wage",
-    "is_sample": 1
+    "is_sample": 1,
+    "delivery_mode": "centre_based",
+    "equipment_obtainable": 1
   }
 ]

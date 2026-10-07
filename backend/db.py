@@ -34,7 +34,9 @@ def init_db():
         source_url TEXT,
         source_note TEXT,
         last_verified TEXT,
-        is_sample INTEGER NOT NULL
+        is_sample INTEGER NOT NULL,
+        delivery_mode TEXT NOT NULL DEFAULT 'either',
+        equipment_obtainable INTEGER NOT NULL DEFAULT 1
     );
     """)
 

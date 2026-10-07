@@ -1,5 +1,5 @@
 # Engine weights, thresholds, and hierarchy for deterministic pathway ranking
-version: 1.0
+version: 1.1
 
 # Ranking factor weights (must sum to 1.00)
 weights:
@@ -15,6 +15,11 @@ thresholds:
   direct_skill_score: 1.0
   adjacent_skill_score: 0.6
   unmatched_skill_score: 0.0
+
+# Minimum relevance rule:
+# A qualification with Low interest match AND Low skill match is not returned, allowing fewer than 3 results.
+minimum_relevance:
+  exclude_low_interest_and_low_skill: true
 
 # Education order hierarchy for hard filters and scoring
 education_levels:

@@ -337,3 +337,166 @@ def test_case_15_every_excluded_item_has_human_readable_reason(fixtures):
     for ex in result.excluded:
         assert isinstance(ex.reason, str)
         assert len(ex.reason.strip()) > 5
+
+# --- Phase 2.1 Specific Tests ---
+
+def test_phase21_home_only_gets_zero_centre_based_results(fixtures):
+    profile = ProfileSchema(
+        education_level="graduate",
+        mobility="home_only",
+        work_preference="either",
+    )
+    result = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    # Zero centre-based results must be returned
+    for p in result.pathways:
+        assert p.delivery_mode in ["home_based", "either"]
+
+    centre_based_quals = [q["id"] for q in fixtures["qualifications"] if q.get("delivery_mode") == "centre_based"]
+    excluded_ids = {ex.id: ex.reason for ex in result.excluded}
+    for cb_id in centre_based_quals:
+        assert cb_id in excluded_ids
+        assert "centre-based" in excluded_ids[cb_id]
+
+def test_phase21_within_village_allows_only_home_based_or_either(fixtures):
+    profile = ProfileSchema(
+        education_level="graduate",
+        mobility="within_village",
+        work_preference="either",
+    )
+    result = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    for p in result.pathways:
+        assert p.delivery_mode in ["home_based", "either"]
+
+    excluded_ids = {ex.id: ex.reason for ex in result.excluded}
+    assert "Q_SEWING_02" in excluded_ids
+    assert "within village only" in excluded_ids["Q_SEWING_02"]
+
+def test_phase21_within_block_requires_centre_in_location_block(fixtures):
+    # Candidate in Anandapuram with within_block mobility
+    # Fixtures have centre in Anandapuram for tailoring, but NOT for solar_technician (in Pendurthi)
+    profile = ProfileSchema(
+        education_level="10th",
+        location_block="Anandapuram",
+        mobility="within_block",
+        work_preference="either",
+        interests=["solar_technician"],
+    )
+    result = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    excluded_ids = {ex.id: ex.reason for ex in result.excluded}
+    assert "Q_SOLAR_01" in excluded_ids
+    assert "Requires a training centre in Anandapuram for this trade" in excluded_ids["Q_SOLAR_01"]
+
+def test_phase21_minimum_relevance_excludes_low_interest_and_skill(fixtures):
+    # Candidate with ONLY tailoring interest and no other skills
+    profile = ProfileSchema(
+        education_level="10th",
+        interests=["tailoring"],
+        skills=[],
+        work_preference="either",
+    )
+    result = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    # Only tailoring pathways should qualify (catering, solar, elec have Low interest & Low skill)
+    for p in result.pathways:
+        assert p.trade == "tailoring"
+    # Number of results is allowed to be fewer than 3
+    assert len(result.pathways) <= 2
+    # Excluded list must contain minimum relevance reason
+    excluded_reasons = [ex.reason for ex in result.excluded]
+    assert any("minimum relevance threshold" in r for r in excluded_reasons)
+
+def test_phase21_recompute_moved_into_top_3_and_non_generic_kept(fixtures):
+    # Setup initial pathways with graduate education, tailoring interest
+    profile = ProfileSchema(
+        education_level="graduate",
+        interests=["tailoring"],
+        work_preference="either",
+    )
+    res_initial = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    prev_ids = [p.id for p in res_initial.pathways]
+
+    # Recompute with home_only constraint which excludes centre-based courses
+    res_recomp = recompute_pathways(
+        profile=profile,
+        previous_pathway_ids=prev_ids,
+        constraints=ConstraintSchema(mobility="home_only"),
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    diff = res_recomp.diff
+    # Any kept item must have an informative, non-generic reason
+    for k in diff.kept:
+        assert len(k.reason) > 0
+        assert "Remains feasible and high-ranking" not in k.reason  # Not generic
+
+    # Any added item when an item was removed should reference the removed item
+    if len(diff.removed) > 0 and len(diff.added) > 0:
+        for a in diff.added:
+            assert "Moved into your top 3 because" in a.reason
+            assert "no longer fits" in a.reason
+
+def test_phase21_opportunity_status_says_sample_opportunity_when_is_sample(fixtures):
+    # In fixtures, opportunities have is_sample: 1
+    profile = ProfileSchema(
+        education_level="10th",
+        interests=["tailoring"],
+        work_preference="self",
+    )
+    result = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    tailor_p = next(p for p in result.pathways if p.trade == "tailoring")
+    assert tailor_p.opportunity_status.startswith("Sample opportunity:")
+    assert "Verified:" not in tailor_p.opportunity_status
+
+def test_phase21_local_demand_returns_unknown_with_no_demand_data(fixtures):
+    profile = ProfileSchema(
+        education_level="10th",
+        interests=["tailoring"],
+    )
+    result = compute_pathways(
+        profile=profile,
+        qualifications=fixtures["qualifications"],
+        training_centres=fixtures["training_centres"],
+        opportunities=fixtures["opportunities"],
+        skill_adjacency=fixtures["skill_adjacency"],
+    )
+    for p in result.pathways:
+        demand_factor = next(f for f in p.factors if f.factor == "local_demand")
+        assert demand_factor.label == "Unknown"
+        assert demand_factor.reason == "No demand data available"
