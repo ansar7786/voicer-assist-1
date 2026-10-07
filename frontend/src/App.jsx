@@ -22,10 +22,10 @@ export default function App() {
         <main style={{ flex: 1, paddingBottom: "2rem" }}>
           <Routes>
             <Route path="/" element={<Consent />} />
-            <Route path="/consent" element={<Navigate to="/" replace />} />
+            <Route path="/consent" element={<Consent />} />
             <Route path="/live" element={<Live />} />
             <Route path="/official" element={<Official />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to="/consent" replace />} />
           </Routes>
         </main>
         <Footer />

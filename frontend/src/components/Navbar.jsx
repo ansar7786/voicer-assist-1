@@ -3,13 +3,16 @@ import { Link, useLocation } from "react-router-dom";
 export default function Navbar() {
   const location = useLocation();
 
-  const navLinkStyle = (path) => ({
-    padding: "0.5rem 1rem",
-    textDecoration: "none",
-    fontWeight: location.pathname === path ? "bold" : "normal",
-    color: location.pathname === path ? "#1e40af" : "#475569",
-    borderBottom: location.pathname === path ? "2px solid #1e40af" : "2px solid transparent",
-  });
+  const navLinkStyle = (path) => {
+    const isActive = location.pathname === path || (path === "/consent" && location.pathname === "/");
+    return {
+      padding: "0.5rem 1rem",
+      textDecoration: "none",
+      fontWeight: isActive ? "bold" : "normal",
+      color: isActive ? "#1e40af" : "#475569",
+      borderBottom: isActive ? "2px solid #1e40af" : "2px solid transparent",
+    };
+  };
 
   return (
     <header
@@ -41,7 +44,7 @@ export default function Navbar() {
       </div>
 
       <nav style={{ display: "flex", gap: "1rem" }}>
-        <Link to="/" style={navLinkStyle("/")}>
+        <Link to="/consent" style={navLinkStyle("/consent")}>
           Consent
         </Link>
         <Link to="/live" style={navLinkStyle("/live")}>
