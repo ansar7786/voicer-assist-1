@@ -1,0 +1,20 @@
+[
+  {
+    "id": "OPP_FIX_01",
+    "trade": "tailoring",
+    "type": "order",
+    "block": "Anandapuram",
+    "source_note": "SHG School Uniform Bulk Stitching Order",
+    "verified": 1,
+    "is_sample": 1
+  },
+  {
+    "id": "OPP_FIX_02",
+    "trade": "catering",
+    "type": "wage",
+    "block": "Bheemunipatnam",
+    "source_note": "Hotel Ocean View Kitchen Assistant Positions",
+    "verified": 1,
+    "is_sample": 1
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "from_skill": "sewing",
+    "to_trade": "tailoring",
+    "closeness": "direct"
+  },
+  {
+    "from_skill": "embroidery",
+    "to_trade": "tailoring",
+    "closeness": "adjacent"
+  },
+  {
+    "from_skill": "cooking",
+    "to_trade": "catering",
+    "closeness": "direct"
+  },
+  {
+    "from_skill": "food_service",
+    "to_trade": "catering",
+    "closeness": "adjacent"
+  },
+  {
+    "from_skill": "wiring",
+    "to_trade": "electrician",
+    "closeness": "direct"
+  },
+  {
+    "from_skill": "solar_installation",
+    "to_trade": "solar_technician",
+    "closeness": "direct"
+  }
+]

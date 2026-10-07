@@ -1,5 +1,7 @@
-# Engine weights and configuration for Pathway Ranking
+# Engine weights, thresholds, and hierarchy for deterministic pathway ranking
 version: 1.0
+
+# Ranking factor weights (must sum to 1.00)
 weights:
   interest_match: 0.30
   skill_match: 0.25
@@ -12,3 +14,19 @@ thresholds:
   max_pathways: 3
   direct_skill_score: 1.0
   adjacent_skill_score: 0.6
+  unmatched_skill_score: 0.0
+
+# Education order hierarchy for hard filters and scoring
+education_levels:
+  none: 0
+  primary: 1
+  8th: 2
+  10th: 3
+  12th: 4
+  ITI: 5
+  graduate: 6
+
+# Factor label thresholds
+factor_labels:
+  high_threshold: 0.70
+  medium_threshold: 0.40

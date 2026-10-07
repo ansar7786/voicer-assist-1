@@ -1,0 +1,32 @@
+[
+  {
+    "id": "TC_FIX_01",
+    "name": "PMKK Centre Anandapuram",
+    "block": "Anandapuram",
+    "trade": "tailoring",
+    "seats": 30,
+    "next_batch_date": "2026-11-01",
+    "mode": "classroom",
+    "is_sample": 1
+  },
+  {
+    "id": "TC_FIX_02",
+    "name": "Hospitality Skill Academy",
+    "block": "Bheemunipatnam",
+    "trade": "catering",
+    "seats": 25,
+    "next_batch_date": "2026-11-10",
+    "mode": "residential",
+    "is_sample": 1
+  },
+  {
+    "id": "TC_FIX_03",
+    "name": "Solar Training Hub",
+    "block": "Pendurthi",
+    "trade": "solar_technician",
+    "seats": 20,
+    "next_batch_date": "2026-11-15",
+    "mode": "classroom",
+    "is_sample": 1
+  }
+]

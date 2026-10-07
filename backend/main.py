@@ -13,8 +13,15 @@ from backend.live import (
 load_dotenv(dotenv_path=ENV_PATH)
 
 from backend.db import get_db_connection, DB_PATH
+from backend.schema import (
+    PathwaysRequest,
+    PathwaysResultSchema,
+    RecomputeRequest,
+    RecomputeResultSchema,
+)
+from backend.engine import compute_pathways, recompute_pathways
 
-app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 1")
+app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,7 +36,7 @@ def health_check():
     api_key = get_gemini_api_key()
     try:
         model = get_gemini_live_model()
-    except ValueError as e:
+    except ValueError:
         model = None
 
     db_ready = False
@@ -46,11 +53,26 @@ def health_check():
 
     return {
         "status": "ok",
-        "phase": 1,
+        "phase": 2,
         "model": model,
         "has_api_key": bool(api_key),
         "db_initialized": db_ready,
     }
+
+@app.post("/api/pathways", response_model=PathwaysResultSchema)
+def get_pathways_endpoint(payload: PathwaysRequest):
+    return compute_pathways(
+        profile=payload.profile,
+        constraints=payload.constraints,
+    )
+
+@app.post("/api/recompute", response_model=RecomputeResultSchema)
+def recompute_pathways_endpoint(payload: RecomputeRequest):
+    return recompute_pathways(
+        profile=payload.profile,
+        previous_pathway_ids=payload.previous_pathway_ids,
+        constraints=payload.constraints,
+    )
 
 @app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
