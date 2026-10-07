@@ -1,5 +1,10 @@
 .env
 node_modules/
+**/node_modules/
+dist/
+**/dist/
 __pycache__/
+*.pyc
 *.db
 .venv/
+.DS_Store
