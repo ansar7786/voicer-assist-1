@@ -1,0 +1,1 @@
+Read docs/PRD.md and docs/VERIFIED_FACTS.md first, every session. Do only the phase I name. Never hardcode API keys, model names, pathways, diffs, badges or numbers. Read config from environment variables. Never commit .env. Never print or log the API key. Commit after each phase. Show verification output, then stop and wait.
