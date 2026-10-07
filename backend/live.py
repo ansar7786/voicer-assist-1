@@ -2,15 +2,27 @@ import os
 import time
 import json
 import asyncio
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import WebSocket, WebSocketDisconnect
 from google import genai
 from google.genai import types
 
-load_dotenv()
+# Explicitly resolve the project-root .env path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_PATH = PROJECT_ROOT / ".env"
+load_dotenv(dotenv_path=ENV_PATH)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_LIVE_MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live") or "gemini-3.8-live"
+def get_gemini_api_key() -> str:
+    load_dotenv(dotenv_path=ENV_PATH)
+    return os.getenv("GEMINI_API_KEY", "").strip()
+
+def get_gemini_live_model() -> str:
+    load_dotenv(dotenv_path=ENV_PATH)
+    return os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live").strip() or "gemini-3.8-live"
+
+GEMINI_API_KEY = get_gemini_api_key()
+GEMINI_LIVE_MODEL = get_gemini_live_model()
 
 def get_live_config() -> types.LiveConnectConfig:
     ping_tool = types.FunctionDeclaration(
@@ -47,22 +59,25 @@ def get_live_config() -> types.LiveConnectConfig:
 
 
 async def handle_live_session(websocket: WebSocket):
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_REAL_KEY":
+    api_key = get_gemini_api_key()
+    live_model = get_gemini_live_model()
+
+    if not api_key:
         await websocket.send_json({
             "type": "error",
-            "message": "GEMINI_API_KEY is not set or still set to placeholder in .env. Please set a valid Gemini API key.",
+            "message": "GEMINI_API_KEY is not set in .env. Please set GEMINI_API_KEY in the project root .env file.",
         })
         await websocket.send_json({"type": "state", "value": "error"})
         await websocket.close()
         return
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
     config = get_live_config()
 
     await websocket.send_json({"type": "state", "value": "connecting"})
 
     try:
-        async with client.aio.live.connect(model=GEMINI_LIVE_MODEL, config=config) as session:
+        async with client.aio.live.connect(model=live_model, config=config) as session:
             await websocket.send_json({"type": "state", "value": "listening"})
 
             async def receive_from_client():

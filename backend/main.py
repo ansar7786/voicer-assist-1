@@ -1,10 +1,16 @@
-import os
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from backend.live import handle_live_session, GEMINI_LIVE_MODEL, GEMINI_API_KEY
+from backend.live import (
+    handle_live_session,
+    get_gemini_api_key,
+    get_gemini_live_model,
+    ENV_PATH,
+)
 
-load_dotenv()
+# Ensure project-root .env is loaded
+load_dotenv(dotenv_path=ENV_PATH)
 
 app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 0")
 
@@ -18,12 +24,12 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health_check():
-    has_key = bool(GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_REAL_KEY")
+    api_key = get_gemini_api_key()
     return {
         "status": "ok",
         "phase": 0,
-        "model": GEMINI_LIVE_MODEL,
-        "has_api_key": has_key,
+        "model": get_gemini_live_model(),
+        "has_api_key": bool(api_key),
     }
 
 @app.websocket("/ws/live")
