@@ -51,6 +51,11 @@ export default function Live() {
   const [selectedWhyPathway, setSelectedWhyPathway] = useState(null);
   const [isUnconfirmedPreview, setIsUnconfirmedPreview] = useState(false);
 
+  // Phase 7: Cached Demo Replays & Accessibility
+  const [replayState, setReplayState] = useState(null);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [textSize, setTextSize] = useState("normal"); // 'normal' | 'large' | 'xl'
+
   // Conversation UI
   const [transcripts, setTranscripts] = useState([]);
   const [toolCalls, setToolCalls] = useState([]);
@@ -165,6 +170,75 @@ export default function Live() {
 
   const handleResetConstraints = async () => {
     handleConstraintChange({});
+  };
+
+  // ── Cached Demo Replay Handlers (Phase 7, FR-68) ───────────────────────────
+
+  const applyReplayTurn = (turn) => {
+    if (!turn) return;
+    const timeStr = new Date().toLocaleTimeString();
+    setTranscripts((prev) => [
+      ...prev,
+      { id: Math.random().toString(36).slice(2, 9), role: "user", text: turn.user_text, final: true, time: timeStr },
+      { id: Math.random().toString(36).slice(2, 9), role: "assistant", text: turn.assistant_text, final: true, time: timeStr },
+    ]);
+    if (turn.profile_snapshot) setProfile(turn.profile_snapshot);
+    if (turn.confidence_snapshot) setConfidence(turn.confidence_snapshot);
+    if (turn.confirmed !== undefined) setConfirmed(turn.confirmed);
+    if (turn.pathways && turn.pathways.length > 0) setPathways(turn.pathways);
+    if (turn.excluded) setExcludedPathways(turn.excluded);
+  };
+
+  const startDemoReplay = async (personaId) => {
+    stopSession();
+    setErrorState(null);
+    try {
+      const res = await fetch(`/api/demo/replay/${personaId}`);
+      if (!res.ok) throw new Error("Failed to load demo replay");
+      const replayData = await res.json();
+      setIsReplaying(true);
+      setTranscripts([]);
+      setProfile({});
+      setConfidence({});
+      setConfirmed(false);
+      setPathways([]);
+      setExcludedPathways([]);
+      setDiff(null);
+      setConstraints({});
+
+      applyReplayTurn(replayData.turns[0]);
+      setReplayState({
+        ...replayData,
+        currentTurnIndex: 0,
+      });
+    } catch (err) {
+      console.error("Demo replay error:", err);
+      setErrorState({
+        code: "replay_error",
+        message: "Failed to load cached demo replay data.",
+        fallback: "retry",
+      });
+    }
+  };
+
+  const nextReplayTurn = () => {
+    if (!replayState) return;
+    const nextIdx = replayState.currentTurnIndex + 1;
+    if (nextIdx < replayState.turns.length) {
+      applyReplayTurn(replayState.turns[nextIdx]);
+      setReplayState((prev) => ({ ...prev, currentTurnIndex: nextIdx }));
+    }
+  };
+
+  const exitReplay = () => {
+    setIsReplaying(false);
+    setReplayState(null);
+    setTranscripts([]);
+    setProfile({});
+    setConfidence({});
+    setConfirmed(false);
+    setPathways([]);
+    setExcludedPathways([]);
   };
 
   // ── Start session ──────────────────────────────────────────────────────────
@@ -395,14 +469,53 @@ export default function Live() {
     }, 150);
   };
 
-  // ── Typed input ────────────────────────────────────────────────────────────
+  // ── Typed input (with Offline Fallback via POST /api/extract - FR-66) ─────
 
-  const sendTextTurn = () => {
-    if (!typedMessage.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+  const sendTextTurn = async () => {
+    if (!typedMessage.trim()) return;
     const msg = typedMessage.trim();
-    wsRef.current.send(JSON.stringify({ type: "text", text: msg }));
-    mergeTranscriptTurn("user", msg, true);
     setTypedMessage("");
+    mergeTranscriptTurn("user", msg, true);
+
+    // If connected to Live WebSocket relay, send via WebSocket
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "text", text: msg }));
+      return;
+    }
+
+    // Offline / Disconnected Fallback: Call POST /api/extract (FR-66)
+    try {
+      const res = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: msg,
+          current_profile: profile,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setProfile(data.profile || {});
+
+        const updatedConf = { ...confidence };
+        Object.keys(data.extracted || {}).forEach((k) => {
+          updatedConf[k] = "stated";
+        });
+        setConfidence(updatedConf);
+
+        mergeTranscriptTurn(
+          "assistant",
+          data.message || "Profile updated from typed input (Offline Fallback).",
+          true
+        );
+      } else {
+        mergeTranscriptTurn("assistant", "Could not process message offline.", true);
+      }
+    } catch (err) {
+      console.error("Offline extract error:", err);
+      mergeTranscriptTurn("assistant", "Offline extractor unavailable.", true);
+    }
   };
 
   const isConnected = status !== "disconnected" && status !== "error";
@@ -438,8 +551,138 @@ export default function Live() {
         error:        "⚠️",
       }[status] || "🎙️";
 
+  const fontSizeScale = textSize === "xl" ? "1.15rem" : textSize === "large" ? "1.05rem" : "0.95rem";
+
   return (
-    <div style={{ maxWidth: 960, margin: "1.5rem auto", padding: "0 1rem", fontFamily: "var(--sans, sans-serif)" }}>
+    <div style={{ maxWidth: 960, margin: "1.5rem auto", padding: "0 1rem", fontFamily: "var(--sans, sans-serif)", fontSize: fontSizeScale }}>
+
+      {/* ── Cached Demo Replay Banner (FR-68) ── */}
+      {isReplaying && (
+        <div
+          id="cached-replay-banner"
+          style={{
+            backgroundColor: "#fef3c7",
+            border: "2px solid #f59e0b",
+            color: "#92400e",
+            padding: "0.85rem 1.25rem",
+            borderRadius: "8px",
+            fontWeight: "bold",
+            marginBottom: "1.25rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <span style={{ fontSize: "1.25rem" }}>⚠️</span>
+            <span>
+              <strong>Cached demo replay:</strong> {replayState?.title} (Turn {replayState?.currentTurnIndex + 1} of {replayState?.turns?.length})
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: "0.6rem" }}>
+            {replayState?.currentTurnIndex < replayState?.turns?.length - 1 && (
+              <button
+                type="button"
+                onClick={nextReplayTurn}
+                style={{
+                  backgroundColor: "#2563eb", color: "#ffffff", border: "none",
+                  padding: "0.4rem 0.85rem", borderRadius: "6px", cursor: "pointer",
+                  fontSize: "0.82rem", fontWeight: "bold",
+                }}
+              >
+                Next Turn ▶
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={exitReplay}
+              style={{
+                backgroundColor: "#dc2626", color: "#ffffff", border: "none",
+                padding: "0.4rem 0.85rem", borderRadius: "6px", cursor: "pointer",
+                fontSize: "0.82rem", fontWeight: "bold",
+              }}
+            >
+              Exit Replay ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Toolbar: Text Size Accessibility & Demo Replays ── */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem", flexWrap: "wrap", gap: "0.6rem" }}>
+        {/* Accessibility Text Size */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <span style={{ fontSize: "0.78rem", color: "#64748b", fontWeight: 600 }}>Text Size:</span>
+          <button
+            type="button"
+            onClick={() => setTextSize("normal")}
+            style={{
+              padding: "0.25rem 0.55rem", fontSize: "0.8rem", borderRadius: "4px",
+              border: "1px solid #cbd5e1", cursor: "pointer",
+              backgroundColor: textSize === "normal" ? "#2563eb" : "#ffffff",
+              color: textSize === "normal" ? "#ffffff" : "#475569",
+              fontWeight: 600,
+            }}
+          >
+            A
+          </button>
+          <button
+            type="button"
+            onClick={() => setTextSize("large")}
+            style={{
+              padding: "0.25rem 0.55rem", fontSize: "0.9rem", borderRadius: "4px",
+              border: "1px solid #cbd5e1", cursor: "pointer",
+              backgroundColor: textSize === "large" ? "#2563eb" : "#ffffff",
+              color: textSize === "large" ? "#ffffff" : "#475569",
+              fontWeight: 600,
+            }}
+          >
+            A+
+          </button>
+          <button
+            type="button"
+            onClick={() => setTextSize("xl")}
+            style={{
+              padding: "0.25rem 0.55rem", fontSize: "1rem", borderRadius: "4px",
+              border: "1px solid #cbd5e1", cursor: "pointer",
+              backgroundColor: textSize === "xl" ? "#2563eb" : "#ffffff",
+              color: textSize === "xl" ? "#ffffff" : "#475569",
+              fontWeight: 600,
+            }}
+          >
+            A++
+          </button>
+        </div>
+
+        {/* Cached Demo Replay Launcher (FR-68) */}
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button
+            type="button"
+            onClick={() => startDemoReplay("persona_a")}
+            disabled={isReplaying}
+            style={{
+              padding: "0.35rem 0.75rem", fontSize: "0.78rem", fontWeight: 600,
+              backgroundColor: "#f8fafc", color: "#1e40af", border: "1px solid #bfdbfe",
+              borderRadius: "6px", cursor: isReplaying ? "not-allowed" : "pointer",
+            }}
+          >
+            🎬 Play Persona A (Tailoring)
+          </button>
+          <button
+            type="button"
+            onClick={() => startDemoReplay("persona_b")}
+            disabled={isReplaying}
+            style={{
+              padding: "0.35rem 0.75rem", fontSize: "0.78rem", fontWeight: 600,
+              backgroundColor: "#f8fafc", color: "#1e40af", border: "1px solid #bfdbfe",
+              borderRadius: "6px", cursor: isReplaying ? "not-allowed" : "pointer",
+            }}
+          >
+            🎬 Play Persona B (Catering)
+          </button>
+        </div>
+      </div>
 
       {/* Two-column layout on wide screens: Voice+Transcript | ProfileCard */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: "1.5rem" }}>

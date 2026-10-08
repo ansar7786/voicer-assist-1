@@ -3,6 +3,7 @@ import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
 import Consent from "./pages/Consent";
 import Live from "./pages/Live";
+import ManualForm from "./pages/ManualForm";
 import Official from "./pages/Official";
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/" element={<Consent />} />
             <Route path="/consent" element={<Consent />} />
             <Route path="/live" element={<Live />} />
+            <Route path="/form" element={<ManualForm />} />
             <Route path="/official" element={<Official />} />
             <Route path="*" element={<Navigate to="/consent" replace />} />
           </Routes>

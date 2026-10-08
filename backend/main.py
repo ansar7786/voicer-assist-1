@@ -65,7 +65,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "phase": 6,
+        "phase": 7,
         "model": model,
         "has_api_key": bool(api_key),
         "db_initialized": db_ready,
@@ -445,6 +445,164 @@ def get_official_summary(
             "sessions": consented_sessions,
         },
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/extract — Fallback Typed Input Extraction (Phase 7, FR-66)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ExtractRequest(BaseModel):
+    text: str
+    current_profile: Optional[Dict[str, Any]] = None
+    language: Optional[str] = "en"
+
+
+class ExtractResponse(BaseModel):
+    extracted: Dict[str, Any]
+    profile: Dict[str, Any]
+    message: str
+
+
+@app.post("/api/extract", response_model=ExtractResponse)
+def extract_endpoint(payload: ExtractRequest):
+    import os
+    import re
+    from backend.blocklist import check_blocked
+    from backend.normalize import (
+        normalize_education,
+        normalize_mobility,
+        normalize_work_preference,
+        normalize_trade,
+        normalize_skill,
+        normalize_asset,
+    )
+
+    raw_text = payload.text.strip()
+    if not raw_text:
+        return ExtractResponse(
+            extracted={},
+            profile=payload.current_profile or {},
+            message="No text provided for extraction.",
+        )
+
+    # Privacy Blocklist Check
+    is_blocked, blocked_reason = check_blocked("input_text", raw_text)
+    if is_blocked:
+        return ExtractResponse(
+            extracted={},
+            profile=payload.current_profile or {},
+            message=f"Restricted {blocked_reason} content detected and excluded.",
+        )
+
+    extracted = {}
+    profile = dict(payload.current_profile or {})
+
+    # 1. Deterministic Normalizers across text
+    from backend.normalize import EDUCATION_SYNONYMS, clean_input, _matches_pattern
+    edu = normalize_education(raw_text)
+    raw_clean = clean_input(raw_text)
+    is_edu_mentioned = False
+    if edu != "none":
+        is_edu_mentioned = True
+    else:
+        for syn in EDUCATION_SYNONYMS.get("none", []):
+            if _matches_pattern(syn, raw_clean):
+                is_edu_mentioned = True
+                break
+
+    if is_edu_mentioned:
+        extracted["education_level"] = edu
+        profile["education_level"] = edu
+
+    mob = normalize_mobility(raw_text)
+    if mob:
+        extracted["mobility"] = mob
+        profile["mobility"] = mob
+
+    wp = normalize_work_preference(raw_text)
+    if wp:
+        extracted["work_preference"] = wp
+        profile["work_preference"] = wp
+
+    tr = normalize_trade(raw_text)
+    if tr:
+        extracted["interests"] = [tr]
+        existing_interests = profile.get("interests", [])
+        if tr not in existing_interests:
+            profile["interests"] = existing_interests + [tr]
+
+    sk = normalize_skill(raw_text)
+    if sk:
+        extracted["skills"] = [sk]
+        existing_skills = profile.get("skills", [])
+        if sk not in existing_skills:
+            profile["skills"] = existing_skills + [sk]
+
+    ast = normalize_asset(raw_text)
+    if ast:
+        extracted["assets"] = [ast]
+        existing_assets = profile.get("assets", [])
+        if ast not in existing_assets:
+            profile["assets"] = existing_assets + [ast]
+
+    # Months regex (e.g., 3 months, 6 నెలలు, 2 महीने)
+    m_match = re.search(r'(\d+)\s*(?:month|months|mo|నెలలు|నెలల|महीने|माह)', raw_text, re.IGNORECASE)
+    if m_match:
+        try:
+            months = int(m_match.group(1))
+            if 1 <= months <= 12:
+                extracted["max_training_months"] = months
+                profile["max_training_months"] = months
+        except ValueError:
+            pass
+
+    # Optional: LLM Enhancement if GEMINI_TEXT_MODEL and API key present
+    api_key = get_gemini_api_key()
+    text_model = os.getenv("GEMINI_TEXT_MODEL", "").strip()
+    if api_key and text_model and not extracted:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            prompt = (
+                "Extract structured livelihood qualification fields from this user message into JSON. "
+                "Allowed keys: education_level, skills (list), interests (list), mobility, max_training_months (int), work_preference. "
+                "NO demographic, caste, religion, address, or ID fields. Return JSON only:\n"
+                f"{raw_text}"
+            )
+            resp = client.models.generate_content(
+                model=text_model,
+                contents=prompt,
+            )
+            if resp and resp.text:
+                clean_json_str = resp.text.strip().removeprefix("```json").removesuffix("```").strip()
+                parsed = json.loads(clean_json_str)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        if v:
+                            extracted[k] = v
+                            profile[k] = v
+        except Exception:
+            pass
+
+    msg = f"Extracted {len(extracted)} field(s) successfully." if extracted else "Could not extract specific attributes from message."
+    return ExtractResponse(
+        extracted=extracted,
+        profile=profile,
+        message=msg,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GET /api/demo/replay/{persona} — Cached Demo Replays (Phase 7, FR-68)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/demo/replay/{persona_id}")
+def demo_replay_endpoint(persona_id: str):
+    from backend.demo_replay import get_demo_replay
+    try:
+        return get_demo_replay(persona_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

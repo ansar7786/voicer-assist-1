@@ -39,7 +39,7 @@ export default function Navbar() {
             fontWeight: "bold",
           }}
         >
-          Phase 1
+          Phase 7
         </span>
       </div>
 
@@ -49,6 +49,9 @@ export default function Navbar() {
         </Link>
         <Link to="/live" style={navLinkStyle("/live")}>
           Live Voice Console
+        </Link>
+        <Link to="/form" style={navLinkStyle("/form")}>
+          Manual Intake
         </Link>
         <Link to="/official" style={navLinkStyle("/official")}>
           Official View
