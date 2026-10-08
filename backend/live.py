@@ -495,218 +495,224 @@ async def handle_live_session(websocket: WebSocket):
                     async def receive_from_gemini():
                         nonlocal session_handle, should_reconnect
                         turn_audio_chunks = 0
-                        async for response in live_session.receive():
-                            # Setup complete trace
-                            if getattr(response, "setup_complete", None):
-                                logger.info("TRACE: setup_complete | time: %.3f", time.time())
+                        while not client_disconnected and not should_reconnect:
+                            received_in_turn = 0
+                            async for response in live_session.receive():
+                                received_in_turn += 1
+                                # Setup complete trace
+                                if getattr(response, "setup_complete", None):
+                                    logger.info("TRACE: setup_complete | time: %.3f", time.time())
 
-                            # Session resumption handle
-                            if response.session_resumption_update:
-                                logger.info("TRACE: session_resumption_update | time: %.3f", time.time())
-                                sru = response.session_resumption_update
-                                if sru.new_handle:
-                                    session_handle = sru.new_handle
-                                    logger.info("EVENT: resumption_handle_updated | time: %.3f", time.time())
+                                # Session resumption handle
+                                if response.session_resumption_update:
+                                    logger.info("TRACE: session_resumption_update | time: %.3f", time.time())
+                                    sru = response.session_resumption_update
+                                    if sru.new_handle:
+                                        session_handle = sru.new_handle
+                                        logger.info("EVENT: resumption_handle_updated | time: %.3f", time.time())
 
-                            # GoAway
-                            if response.go_away:
-                                logger.info("TRACE: go_away | time: %.3f", time.time())
-                                logger.info("EVENT: go_away_received | time: %.3f", time.time())
-                                await websocket.send_json({"type": "state", "value": "reconnecting"})
-                                should_reconnect = True
-                                break
+                                # GoAway
+                                if response.go_away:
+                                    logger.info("TRACE: go_away | time: %.3f", time.time())
+                                    logger.info("EVENT: go_away_received | time: %.3f", time.time())
+                                    await websocket.send_json({"type": "state", "value": "reconnecting"})
+                                    should_reconnect = True
+                                    break
 
-                            # Server content
-                            sc = response.server_content
-                            if sc:
-                                if sc.interrupted:
-                                    logger.info("TRACE: interrupted | time: %.3f", time.time())
-                                    logger.info("EVENT: server_interrupted | time: %.3f", time.time())
-                                    turn_audio_chunks = 0
-                                    await websocket.send_json({"type": "interrupted"})
-                                    await websocket.send_json({"type": "state", "value": "listening"})
+                                # Server content
+                                sc = response.server_content
+                                if sc:
+                                    if sc.interrupted:
+                                        logger.info("TRACE: interrupted | time: %.3f", time.time())
+                                        logger.info("EVENT: server_interrupted | time: %.3f", time.time())
+                                        turn_audio_chunks = 0
+                                        await websocket.send_json({"type": "interrupted"})
+                                        await websocket.send_json({"type": "state", "value": "listening"})
 
-                                if sc.input_transcription and sc.input_transcription.text:
-                                    is_final = bool(sc.input_transcription.finished)
-                                    logger.info("TRACE: input_transcription | finished: %s | time: %.3f",
-                                                is_final, time.time())
-                                    await websocket.send_json({
-                                        "type": "transcript",
-                                        "role": "user",
-                                        "text": sc.input_transcription.text,
-                                        "final": is_final,
-                                    })
-                                    if is_final:
-                                        start_watchdog()
+                                    if sc.input_transcription and sc.input_transcription.text:
+                                        is_final = bool(sc.input_transcription.finished)
+                                        logger.info("TRACE: input_transcription | finished: %s | time: %.3f",
+                                                    is_final, time.time())
+                                        await websocket.send_json({
+                                            "type": "transcript",
+                                            "role": "user",
+                                            "text": sc.input_transcription.text,
+                                            "final": is_final,
+                                        })
+                                        if is_final:
+                                            start_watchdog()
 
-                                if sc.output_transcription and sc.output_transcription.text:
-                                    reset_watchdog()
-                                    logger.info("TRACE: output_transcription | finished: %s | time: %.3f",
-                                                bool(sc.output_transcription.finished), time.time())
-                                    await websocket.send_json({
-                                        "type": "transcript",
-                                        "role": "assistant",
-                                        "text": sc.output_transcription.text,
-                                        "final": bool(sc.output_transcription.finished),
-                                    })
+                                    if sc.output_transcription and sc.output_transcription.text:
+                                        reset_watchdog()
+                                        logger.info("TRACE: output_transcription | finished: %s | time: %.3f",
+                                                    bool(sc.output_transcription.finished), time.time())
+                                        await websocket.send_json({
+                                            "type": "transcript",
+                                            "role": "assistant",
+                                            "text": sc.output_transcription.text,
+                                            "final": bool(sc.output_transcription.finished),
+                                        })
 
-                                if sc.model_turn and sc.model_turn.parts:
-                                    reset_watchdog()
-                                    audio_chunk_count = sum(
-                                        1 for part in sc.model_turn.parts
-                                        if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None)
-                                    )
-                                    if audio_chunk_count > 0:
-                                        turn_audio_chunks += audio_chunk_count
-                                        logger.info("TRACE: model_audio | chunk_count: %d | time: %.3f",
+                                    if sc.model_turn and sc.model_turn.parts:
+                                        reset_watchdog()
+                                        audio_chunk_count = sum(
+                                            1 for part in sc.model_turn.parts
+                                            if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None)
+                                        )
+                                        if audio_chunk_count > 0:
+                                            turn_audio_chunks += audio_chunk_count
+                                            logger.info("TRACE: model_audio | chunk_count: %d | time: %.3f",
+                                                        turn_audio_chunks, time.time())
+
+                                        for part in sc.model_turn.parts:
+                                            if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
+                                                await websocket.send_json({"type": "state", "value": "speaking"})
+                                                await websocket.send_bytes(part.inline_data.data)
+                                            if getattr(part, "text", None):
+                                                await websocket.send_json({
+                                                    "type": "transcript",
+                                                    "role": "assistant",
+                                                    "text": part.text,
+                                                    "final": False,
+                                                })
+
+                                    if sc.turn_complete:
+                                        reset_watchdog()
+                                        logger.info("TRACE: turn_complete | audio_chunks: %d | time: %.3f",
                                                     turn_audio_chunks, time.time())
+                                        turn_audio_chunks = 0
+                                        await websocket.send_json({"type": "turn_complete"})
+                                        await websocket.send_json({"type": "state", "value": "listening"})
 
-                                    for part in sc.model_turn.parts:
-                                        if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
-                                            await websocket.send_json({"type": "state", "value": "speaking"})
-                                            await websocket.send_bytes(part.inline_data.data)
-                                        if getattr(part, "text", None):
-                                            await websocket.send_json({
-                                                "type": "transcript",
-                                                "role": "assistant",
-                                                "text": part.text,
-                                                "final": False,
-                                            })
-
-                                if sc.turn_complete:
+                                # Tool calls
+                                tc = response.tool_call
+                                if tc and tc.function_calls:
                                     reset_watchdog()
-                                    logger.info("TRACE: turn_complete | audio_chunks: %d | time: %.3f",
-                                                turn_audio_chunks, time.time())
-                                    turn_audio_chunks = 0
-                                    await websocket.send_json({"type": "turn_complete"})
-                                    await websocket.send_json({"type": "state", "value": "listening"})
+                                    for fc in tc.function_calls:
+                                        logger.info("TRACE: tool_call | name: %s | time: %.3f", fc.name, time.time())
+                                    logger.info("EVENT: tool_call_received | count: %d | time: %.3f",
+                                                len(tc.function_calls), time.time())
+                                    has_blocking = any(fc.name in ("confirm_profile", "ping") for fc in tc.function_calls)
+                                    if has_blocking:
+                                        await websocket.send_json({"type": "state", "value": "thinking"})
+                                    tool_responses = []
 
-                            # Tool calls
-                            tc = response.tool_call
-                            if tc and tc.function_calls:
-                                reset_watchdog()
-                                for fc in tc.function_calls:
-                                    logger.info("TRACE: tool_call | name: %s | time: %.3f", fc.name, time.time())
-                                logger.info("EVENT: tool_call_received | count: %d | time: %.3f",
-                                            len(tc.function_calls), time.time())
-                                has_blocking = any(fc.name in ("confirm_profile", "ping") for fc in tc.function_calls)
-                                if has_blocking:
-                                    await websocket.send_json({"type": "state", "value": "thinking"})
-                                tool_responses = []
+                                    for fc in tc.function_calls:
+                                        args = fc.args or {}
+                                        fn_name = fc.name
+                                        has_tool_error = False
 
-                                for fc in tc.function_calls:
-                                    args = fc.args or {}
-                                    fn_name = fc.name
-                                    has_tool_error = False
-
-                                    try:
-                                        # Dispatch
-                                        if fn_name == "ping":
-                                            resp_data = handle_ping(args)
-                                            # Only notify browser for ping (visible tool)
-                                            await websocket.send_json({
-                                                "type": "tool_call",
-                                                "name": fn_name,
-                                                "args": args,
-                                                "id": fc.id,
-                                                "timestamp": time.time(),
-                                            })
-
-                                        elif fn_name == "update_profile":
-                                            resp_data = handle_update_profile(args, session)
-                                            if resp_data.get("ok"):
-                                                # Push profile_update event to browser
-                                                profile_export = {
-                                                    k: v for k, v in session.profile.items()
-                                                    if not k.startswith("_")
-                                                }
-                                                confidence_map = session.profile.get("_confidence", {})
-                                                await session.push("profile_update", {
-                                                    "profile": profile_export,
-                                                    "confidence": confidence_map,
-                                                    "confirmed": session.confirmed,
+                                        try:
+                                            # Dispatch
+                                            if fn_name == "ping":
+                                                resp_data = handle_ping(args)
+                                                # Only notify browser for ping (visible tool)
+                                                await websocket.send_json({
+                                                    "type": "tool_call",
+                                                    "name": fn_name,
+                                                    "args": args,
+                                                    "id": fc.id,
+                                                    "timestamp": time.time(),
                                                 })
-                                                # Persist to DB
-                                                _persist_profile(session)
 
-                                        elif fn_name == "confirm_profile":
-                                            resp_data = handle_confirm_profile(args, session)
-                                            if resp_data.get("ok"):
-                                                profile_export = {
-                                                    k: v for k, v in session.profile.items()
-                                                    if not k.startswith("_")
+                                            elif fn_name == "update_profile":
+                                                resp_data = handle_update_profile(args, session)
+                                                if resp_data.get("ok"):
+                                                    # Push profile_update event to browser
+                                                    profile_export = {
+                                                        k: v for k, v in session.profile.items()
+                                                        if not k.startswith("_")
+                                                    }
+                                                    confidence_map = session.profile.get("_confidence", {})
+                                                    await session.push("profile_update", {
+                                                        "profile": profile_export,
+                                                        "confidence": confidence_map,
+                                                        "confirmed": session.confirmed,
+                                                    })
+                                                    # Persist to DB
+                                                    _persist_profile(session)
+
+                                            elif fn_name == "confirm_profile":
+                                                resp_data = handle_confirm_profile(args, session)
+                                                if resp_data.get("ok"):
+                                                    profile_export = {
+                                                        k: v for k, v in session.profile.items()
+                                                        if not k.startswith("_")
+                                                    }
+                                                    confidence_map = session.profile.get("_confidence", {})
+                                                    await session.push("profile_update", {
+                                                        "profile": profile_export,
+                                                        "confidence": confidence_map,
+                                                        "confirmed": True,
+                                                    })
+                                                    _persist_profile(session)
+
+                                            else:
+                                                resp_data = {
+                                                    "error": "unknown_tool",
+                                                    "name": fn_name,
+                                                    "recoverable": True,
                                                 }
-                                                confidence_map = session.profile.get("_confidence", {})
-                                                await session.push("profile_update", {
-                                                    "profile": profile_export,
-                                                    "confidence": confidence_map,
-                                                    "confirmed": True,
-                                                })
-                                                _persist_profile(session)
 
-                                        else:
+                                            if isinstance(resp_data, dict) and resp_data.get("error") == "tool_error":
+                                                has_tool_error = True
+                                        except Exception:
+                                            has_tool_error = True
                                             resp_data = {
-                                                "error": "unknown_tool",
-                                                "name": fn_name,
+                                                "error": "tool_error",
+                                                "message": "Tool execution failed recoverably",
                                                 "recoverable": True,
                                             }
 
-                                        if isinstance(resp_data, dict) and resp_data.get("error") == "tool_error":
-                                            has_tool_error = True
-                                    except Exception:
-                                        has_tool_error = True
-                                        resp_data = {
-                                            "error": "tool_error",
-                                            "message": "Tool execution failed recoverably",
-                                            "recoverable": True,
-                                        }
+                                        if has_tool_error:
+                                            logger.error("EVENT: error | code: tool_error | time: %.3f", time.time())
+                                            try:
+                                                await websocket.send_json({
+                                                    "type": "error",
+                                                    "code": "tool_error",
+                                                    "message": "A tool encountered an error during execution.",
+                                                    "fallback": "retry",
+                                                })
+                                            except Exception:
+                                                pass
 
-                                    if has_tool_error:
-                                        logger.error("EVENT: error | code: tool_error | time: %.3f", time.time())
-                                        try:
-                                            await websocket.send_json({
-                                                "type": "error",
-                                                "code": "tool_error",
-                                                "message": "A tool encountered an error during execution.",
-                                                "fallback": "retry",
-                                            })
-                                        except Exception:
-                                            pass
-
-                                    sched_val = (
-                                        get_update_profile_scheduling()
-                                        if fn_name == "update_profile"
-                                        else None
-                                    )
-                                    behavior_val = get_tool_behavior(fn_name)
-                                    sched_name = (
-                                        getattr(sched_val, "name", None)
-                                        or getattr(sched_val, "value", None)
-                                        or ("DEFAULT" if sched_val is None else str(sched_val))
-                                    )
-                                    logger.info(
-                                        "TRACE: tool_response | name: %s | behavior: %s | scheduling: %s | time: %.3f",
-                                        fn_name,
-                                        behavior_val,
-                                        sched_name,
-                                        time.time(),
-                                    )
-
-                                    tool_responses.append(
-                                        types.FunctionResponse(
-                                            name=fn_name,
-                                            id=fc.id,
-                                            response=resp_data,
-                                            scheduling=sched_val,
+                                        sched_val = (
+                                            get_update_profile_scheduling()
+                                            if fn_name == "update_profile"
+                                            else None
                                         )
-                                    )
+                                        behavior_val = get_tool_behavior(fn_name)
+                                        sched_name = (
+                                            getattr(sched_val, "name", None)
+                                            or getattr(sched_val, "value", None)
+                                            or ("DEFAULT" if sched_val is None else str(sched_val))
+                                        )
+                                        logger.info(
+                                            "TRACE: tool_response | name: %s | behavior: %s | scheduling: %s | time: %.3f",
+                                            fn_name,
+                                            behavior_val,
+                                            sched_name,
+                                            time.time(),
+                                        )
 
-                                if tool_responses:
-                                    await live_session.send_tool_response(
-                                        function_responses=tool_responses
-                                    )
-                                    if not has_blocking:
-                                        await websocket.send_json({"type": "state", "value": "listening"})
+                                        tool_responses.append(
+                                            types.FunctionResponse(
+                                                name=fn_name,
+                                                id=fc.id,
+                                                response=resp_data,
+                                                scheduling=sched_val,
+                                            )
+                                        )
+
+                                    if tool_responses:
+                                        await live_session.send_tool_response(
+                                            function_responses=tool_responses
+                                        )
+                                        if not has_blocking:
+                                            await websocket.send_json({"type": "state", "value": "listening"})
+
+                            if received_in_turn == 0:
+                                break
 
                     sender_t = asyncio.create_task(send_to_gemini())
                     receiver_t = asyncio.create_task(receive_from_gemini())

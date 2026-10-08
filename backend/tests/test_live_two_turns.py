@@ -44,8 +44,12 @@ class MockAsyncLiveSession:
         self.sent_tool_responses.append(function_responses)
 
     async def receive(self):
-        for resp in self.responses_by_turn:
+        while self.responses_by_turn:
+            resp = self.responses_by_turn.pop(0)
             yield resp
+            sc = getattr(resp, "server_content", None)
+            if sc and getattr(sc, "turn_complete", False):
+                break
 
 
 def make_turn_1_and_2_responses():
