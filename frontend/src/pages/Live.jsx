@@ -7,7 +7,7 @@ export default function Live() {
 
   // Session / connection state
   const [status, setStatus] = useState("disconnected");
-  const [errorMsg, setErrorMsg] = useState("");
+  const [errorState, setErrorState] = useState(null); // { code, message, fallback }
   const [sessionId, setSessionId] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
 
@@ -106,7 +106,7 @@ export default function Live() {
   // ── Start session ──────────────────────────────────────────────────────────
 
   const startSession = async () => {
-    setErrorMsg("");
+    setErrorState(null);
     setStatus("connecting");
     setIsMuted(false);
     isMutedRef.current = false;
@@ -166,6 +166,7 @@ export default function Live() {
 
       ws.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
+          setErrorState(null);
           handleIncomingAudio(event.data);
           return;
         }
@@ -183,9 +184,13 @@ export default function Live() {
               setStatus("listening");
               break;
             case "transcript":
+              if (data.role === "assistant") {
+                setErrorState(null);
+              }
               mergeTranscriptTurn(data.role, data.text, Boolean(data.final));
               break;
             case "turn_complete":
+              setErrorState(null);
               finalizeLatestTurn();
               setStatus("listening");
               break;
@@ -206,7 +211,11 @@ export default function Live() {
               setConfirmed(data.confirmed || false);
               break;
             case "error":
-              setErrorMsg(data.message);
+              setErrorState({
+                code: data.code || "unknown_error",
+                message: data.message || "An unexpected error occurred.",
+                fallback: data.fallback || "retry",
+              });
               setStatus("error");
               break;
             default:
@@ -218,7 +227,11 @@ export default function Live() {
       };
 
       ws.onerror = () => {
-        setErrorMsg("WebSocket error. Is the backend running on port 8000?");
+        setErrorState({
+          code: "connection_lost",
+          message: "WebSocket error. Is the backend running on port 8000?",
+          fallback: "retry",
+        });
         setStatus("error");
       };
 
@@ -226,11 +239,16 @@ export default function Live() {
         setStatus((s) => (s === "error" ? s : "disconnected"));
       };
     } catch (err) {
-      setErrorMsg(err.message || "Failed to initialize microphone or connection");
+      setErrorState({
+        code: "media_error",
+        message: err.message || "Failed to initialize microphone or connection",
+        fallback: "retry",
+      });
       setStatus("error");
       stopSession();
     }
   };
+
 
   // ── Playback ───────────────────────────────────────────────────────────────
 
@@ -277,6 +295,24 @@ export default function Live() {
     setStatus("disconnected");
     setIsMuted(false);
     isMutedRef.current = false;
+  };
+
+  const handleRetry = () => {
+    stopSession();
+    setTimeout(() => {
+      startSession();
+    }, 100);
+  };
+
+  const handleUseTypedInput = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      startSession();
+    } else {
+      setStatus("listening");
+    }
+    setTimeout(() => {
+      document.getElementById("typed-input")?.focus();
+    }, 150);
   };
 
   // ── Typed input ────────────────────────────────────────────────────────────
@@ -412,13 +448,68 @@ export default function Live() {
           </div>
 
           {/* Error banner */}
-          {errorMsg && (
-            <div style={{
-              padding: "0.75rem 1rem", marginBottom: "1.25rem",
-              backgroundColor: "#fef2f2", color: "#991b1b",
-              border: "1px solid #fecaca", borderRadius: "6px",
-            }}>
-              <strong>Error:</strong> {errorMsg}
+          {errorState && (
+            <div
+              id="live-error-banner"
+              style={{
+                padding: "1rem 1.25rem",
+                marginBottom: "1.25rem",
+                backgroundColor: "#fef2f2",
+                color: "#991b1b",
+                border: "1px solid #fecaca",
+                borderRadius: "8px",
+                boxShadow: "0 2px 4px rgba(239,68,68,0.08)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontWeight: "bold", fontSize: "0.95rem", marginBottom: "0.25rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span>⚠️</span>
+                    <span>{errorState.code ? `Error (${errorState.code})` : "Error"}</span>
+                  </div>
+                  <p style={{ margin: 0, fontSize: "0.9rem", color: "#7f1d1d", lineHeight: 1.4 }}>
+                    {errorState.message}
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", marginTop: "0.25rem" }}>
+                  <button
+                    id="btn-error-retry"
+                    type="button"
+                    onClick={handleRetry}
+                    style={{
+                      padding: "0.45rem 0.9rem",
+                      fontSize: "0.85rem",
+                      fontWeight: "bold",
+                      cursor: "pointer",
+                      borderRadius: "6px",
+                      border: "1px solid #dc2626",
+                      backgroundColor: "#dc2626",
+                      color: "#ffffff",
+                      boxShadow: "0 1px 2px rgba(220,38,38,0.2)",
+                    }}
+                  >
+                    🔄 Retry
+                  </button>
+                  <button
+                    id="btn-error-typed"
+                    type="button"
+                    onClick={handleUseTypedInput}
+                    style={{
+                      padding: "0.45rem 0.9rem",
+                      fontSize: "0.85rem",
+                      fontWeight: "bold",
+                      cursor: "pointer",
+                      borderRadius: "6px",
+                      border: "1px solid #cbd5e1",
+                      backgroundColor: "#ffffff",
+                      color: "#1e293b",
+                      boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
+                    }}
+                  >
+                    ⌨️ Use typed input
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

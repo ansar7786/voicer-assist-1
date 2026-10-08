@@ -230,21 +230,23 @@ def _normalise_list(
 # ---------------------------------------------------------------------------
 
 def handle_ping(args: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "status": "pong",
-        "message": args.get("message", "pong"),
-    }
+    try:
+        return {
+            "status": "pong",
+            "message": args.get("message", "pong"),
+        }
+    except Exception:
+        return {
+            "error": "tool_error",
+            "message": "ping execution failed",
+            "recoverable": True,
+        }
 
 
-def handle_update_profile(
+def _do_update_profile(
     args: Dict[str, Any],
     session: SessionState,
 ) -> Dict[str, Any]:
-    """
-    Validate every argument, apply blocklist, normalise, then update session.
-    Returns a tool-response dict: {"ok": True, "updated": [...]}
-    or {"error": "...", "allowed_values": [...]} on validation failure.
-    """
     if session.is_rate_limited():
         return {
             "error": "rate_limited",
@@ -468,6 +470,25 @@ def handle_update_profile(
     return {"ok": True, "updated": updated_fields}
 
 
+def handle_update_profile(
+    args: Dict[str, Any],
+    session: SessionState,
+) -> Dict[str, Any]:
+    """
+    Validate every argument, apply blocklist, normalise, then update session.
+    Returns a tool-response dict: {"ok": True, "updated": [...]}
+    or {"error": "...", "allowed_values": [...]} on validation failure.
+    """
+    try:
+        return _do_update_profile(args, session)
+    except Exception:
+        return {
+            "error": "tool_error",
+            "message": "update_profile execution failed",
+            "recoverable": True,
+        }
+
+
 def handle_confirm_profile(
     args: Dict[str, Any],
     session: SessionState,
@@ -475,34 +496,41 @@ def handle_confirm_profile(
     """
     Validates summary_spoken is present, marks the profile confirmed.
     """
-    summary = args.get("summary_spoken", "").strip()
-    if not summary:
-        return {
-            "error": "missing_required",
-            "field": "summary_spoken",
-            "message": "summary_spoken is required and must not be empty",
-        }
+    try:
+        summary = args.get("summary_spoken", "").strip()
+        if not summary:
+            return {
+                "error": "missing_required",
+                "field": "summary_spoken",
+                "message": "summary_spoken is required and must not be empty",
+            }
 
-    if not session.profile:
-        return {
-            "error": "empty_profile",
-            "message": (
-                "No profile fields have been collected yet. "
-                "Please gather education_level, mobility, and interests first."
-            ),
-        }
+        if not session.profile:
+            return {
+                "error": "empty_profile",
+                "message": (
+                    "No profile fields have been collected yet. "
+                    "Please gather education_level, mobility, and interests first."
+                ),
+            }
 
-    session.set_confirmed()
-    return {
-        "ok": True,
-        "confirmed": True,
-        "profile_fields_count": len([
-            k for k in session.profile
-            if not k.startswith("_")
-        ]),
-        # High-priority fields not yet captured
-        "missing_priority_fields": _missing_priority(session),
-    }
+        session.set_confirmed()
+        return {
+            "ok": True,
+            "confirmed": True,
+            "profile_fields_count": len([
+                k for k in session.profile
+                if not k.startswith("_")
+            ]),
+            # High-priority fields not yet captured
+            "missing_priority_fields": _missing_priority(session),
+        }
+    except Exception:
+        return {
+            "error": "tool_error",
+            "message": "confirm_profile execution failed",
+            "recoverable": True,
+        }
 
 
 def _missing_priority(session: SessionState) -> List[str]:

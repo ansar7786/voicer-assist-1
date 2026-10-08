@@ -179,24 +179,115 @@ def _persist_profile(session: SessionState):
 
 
 # ---------------------------------------------------------------------------
+# Error classification and watchdog helpers
+# ---------------------------------------------------------------------------
+def classify_live_error(exc: Exception) -> dict:
+    exc_str = str(exc).lower()
+
+    # 1. Quota exceeded (429, resource_exhausted, quota)
+    if "429" in exc_str or "resource_exhausted" in exc_str or "quota" in exc_str:
+        return {
+            "code": "quota_exceeded",
+            "message": "Voice service quota reached. Please try typed input or retry shortly.",
+            "fallback": "typed",
+        }
+    # 2. Auth failed (bad key, 401, 403, api_key, unauthenticated, permission_denied)
+    if (
+        "401" in exc_str
+        or "403" in exc_str
+        or "auth" in exc_str
+        or "permission_denied" in exc_str
+        or "unauthenticated" in exc_str
+        or "api_key" in exc_str
+    ):
+        return {
+            "code": "auth_failed",
+            "message": "Authentication failed. Please verify API configuration.",
+            "fallback": "retry",
+        }
+    # 3. Session expired (session_expired, resumption handle invalid/expired)
+    if "session_expired" in exc_str or "expired" in exc_str or ("handle" in exc_str and "invalid" in exc_str):
+        return {
+            "code": "session_expired",
+            "message": "Voice session expired. Please retry to reconnect.",
+            "fallback": "retry",
+        }
+    # 4. Model unavailable (404, 503, unavailable, not_found)
+    if "503" in exc_str or "404" in exc_str or "unavailable" in exc_str or "not_found" in exc_str:
+        return {
+            "code": "model_unavailable",
+            "message": "Live voice model is currently unavailable. Please try typed input.",
+            "fallback": "typed",
+        }
+    # 5. Connection lost
+    if (
+        isinstance(exc, (ConnectionError, EOFError, asyncio.IncompleteReadError, WebSocketDisconnect))
+        or "connection" in exc_str
+        or "disconnect" in exc_str
+        or "reset" in exc_str
+        or "closed" in exc_str
+        or "broken" in exc_str
+    ):
+        return {
+            "code": "connection_lost",
+            "message": "Connection to voice service was lost. Please retry.",
+            "fallback": "retry",
+        }
+    # Default fallback
+    return {
+        "code": "connection_lost",
+        "message": "Connection to voice service was interrupted. Please retry.",
+        "fallback": "retry",
+    }
+
+
+def get_no_reply_timeout() -> float:
+    env_val = os.getenv("LIVE_NO_REPLY_TIMEOUT_SECONDS")
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    try:
+        import yaml
+        cfg_path = Path(__file__).resolve().parent / "engine_config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+                timeout = cfg.get("live_session", {}).get("no_reply_timeout_seconds")
+                if timeout is not None:
+                    return float(timeout)
+    except Exception:
+        pass
+    return 10.0
+
+
+# ---------------------------------------------------------------------------
 # Main WebSocket handler
 # ---------------------------------------------------------------------------
 async def handle_live_session(websocket: WebSocket):
     api_key = get_gemini_api_key()
     try:
         live_model = get_gemini_live_model()
-    except ValueError as e:
-        logger.error("EVENT: config_error | time: %.3f", time.time())
-        await websocket.send_json({"type": "error", "message": str(e)})
+    except ValueError:
+        logger.error("EVENT: error | code: model_unavailable | time: %.3f", time.time())
+        await websocket.send_json({
+            "type": "error",
+            "code": "model_unavailable",
+            "message": "Live model configuration is missing or invalid.",
+            "fallback": "retry",
+        })
         await websocket.send_json({"type": "state", "value": "error"})
         await websocket.close()
         return
 
     if not api_key:
-        logger.error("EVENT: auth_missing | time: %.3f", time.time())
+        logger.error("EVENT: error | code: auth_failed | time: %.3f", time.time())
         await websocket.send_json({
             "type": "error",
-            "message": "GEMINI_API_KEY is not set in .env",
+            "code": "auth_failed",
+            "message": "Authentication failed. GEMINI_API_KEY is not set in .env",
+            "fallback": "retry",
         })
         await websocket.send_json({"type": "state", "value": "error"})
         await websocket.close()
@@ -243,7 +334,7 @@ async def handle_live_session(websocket: WebSocket):
     client_queue: asyncio.Queue = asyncio.Queue()
 
     async def client_reader():
-        nonlocal client_disconnected
+        nonlocal client_disconnected, session
         try:
             while True:
                 message = await websocket.receive()
@@ -277,6 +368,35 @@ async def handle_live_session(websocket: WebSocket):
             client_disconnected = True
             await client_queue.put({"type": "disconnect"})
 
+    watchdog_timeout = get_no_reply_timeout()
+    watchdog_task: Optional[asyncio.Task] = None
+
+    async def _watchdog_timer():
+        try:
+            await asyncio.sleep(watchdog_timeout)
+            logger.error("EVENT: error | code: no_reply | time: %.3f", time.time())
+            await websocket.send_json({
+                "type": "error",
+                "code": "no_reply",
+                "message": "Assistant took too long to respond. Please try speaking again or use typed input.",
+                "fallback": "typed",
+            })
+            await websocket.send_json({"type": "state", "value": "error"})
+        except asyncio.CancelledError:
+            pass
+
+    def start_watchdog():
+        nonlocal watchdog_task
+        if watchdog_task and not watchdog_task.done():
+            watchdog_task.cancel()
+        watchdog_task = asyncio.create_task(_watchdog_timer())
+
+    def reset_watchdog():
+        nonlocal watchdog_task
+        if watchdog_task and not watchdog_task.done():
+            watchdog_task.cancel()
+        watchdog_task = None
+
     reader_task = asyncio.create_task(client_reader())
 
     try:
@@ -306,6 +426,7 @@ async def handle_live_session(websocket: WebSocket):
                                     )
                                 )
                             elif itype == "text":
+                                start_watchdog()
                                 logger.info("EVENT: send_client_content | time: %.3f", time.time())
                                 await live_session.send_client_content(
                                     turns=types.Content(
@@ -344,14 +465,18 @@ async def handle_live_session(websocket: WebSocket):
                                     await websocket.send_json({"type": "state", "value": "listening"})
 
                                 if sc.input_transcription and sc.input_transcription.text:
+                                    is_final = bool(sc.input_transcription.finished)
                                     await websocket.send_json({
                                         "type": "transcript",
                                         "role": "user",
                                         "text": sc.input_transcription.text,
-                                        "final": bool(sc.input_transcription.finished),
+                                        "final": is_final,
                                     })
+                                    if is_final:
+                                        start_watchdog()
 
                                 if sc.output_transcription and sc.output_transcription.text:
+                                    reset_watchdog()
                                     await websocket.send_json({
                                         "type": "transcript",
                                         "role": "assistant",
@@ -360,6 +485,7 @@ async def handle_live_session(websocket: WebSocket):
                                     })
 
                                 if sc.model_turn and sc.model_turn.parts:
+                                    reset_watchdog()
                                     for part in sc.model_turn.parts:
                                         if part.inline_data and part.inline_data.data:
                                             await websocket.send_json({"type": "state", "value": "speaking"})
@@ -379,6 +505,7 @@ async def handle_live_session(websocket: WebSocket):
                             # Tool calls
                             tc = response.tool_call
                             if tc and tc.function_calls:
+                                reset_watchdog()
                                 logger.info("EVENT: tool_call_received | count: %d | time: %.3f",
                                             len(tc.function_calls), time.time())
                                 has_blocking = any(fc.name in ("confirm_profile", "ping") for fc in tc.function_calls)
@@ -389,6 +516,7 @@ async def handle_live_session(websocket: WebSocket):
                                 for fc in tc.function_calls:
                                     args = fc.args or {}
                                     fn_name = fc.name
+                                    has_tool_error = False
 
                                     try:
                                         # Dispatch
@@ -436,10 +564,33 @@ async def handle_live_session(websocket: WebSocket):
                                                 _persist_profile(session)
 
                                         else:
-                                            resp_data = {"error": "unknown_tool", "name": fn_name}
+                                            resp_data = {
+                                                "error": "unknown_tool",
+                                                "name": fn_name,
+                                                "recoverable": True,
+                                            }
+
+                                        if isinstance(resp_data, dict) and resp_data.get("error") == "tool_error":
+                                            has_tool_error = True
                                     except Exception:
-                                        logger.error("EVENT: tool_execution_error | tool: %s | time: %.3f", fn_name, time.time())
-                                        resp_data = {"error": "execution_failed", "tool": fn_name}
+                                        has_tool_error = True
+                                        resp_data = {
+                                            "error": "tool_error",
+                                            "message": "Tool execution failed recoverably",
+                                            "recoverable": True,
+                                        }
+
+                                    if has_tool_error:
+                                        logger.error("EVENT: error | code: tool_error | time: %.3f", time.time())
+                                        try:
+                                            await websocket.send_json({
+                                                "type": "error",
+                                                "code": "tool_error",
+                                                "message": "A tool encountered an error during execution.",
+                                                "fallback": "retry",
+                                            })
+                                        except Exception:
+                                            pass
 
                                     tool_responses.append(
                                         types.FunctionResponse(
@@ -466,26 +617,32 @@ async def handle_live_session(websocket: WebSocket):
                     )
                     for t in pending:
                         t.cancel()
+                    for t in done:
+                        if t.exception():
+                            raise t.exception()
 
-            except Exception:
-                logger.error("EVENT: session_exception | time: %.3f", time.time())
+            except Exception as e:
+                err_info = classify_live_error(e)
+                logger.error("EVENT: error | code: %s | time: %.3f", err_info["code"], time.time())
                 if client_disconnected:
                     break
-                if session_handle:
-                    should_reconnect = True
-                    await asyncio.sleep(0.5)
-                else:
+                try:
                     await websocket.send_json({
                         "type": "error",
-                        "message": "Session error. Please try again.",
+                        "code": err_info["code"],
+                        "message": err_info["message"],
+                        "fallback": err_info["fallback"],
                     })
                     await websocket.send_json({"type": "state", "value": "error"})
-                    break
+                except Exception:
+                    pass
+                break
 
             if not should_reconnect or client_disconnected:
                 break
 
     finally:
+        reset_watchdog()
         reader_task.cancel()
         # Final profile persistence on disconnect
         if session.profile:
@@ -495,3 +652,4 @@ async def handle_live_session(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+

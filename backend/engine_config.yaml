@@ -35,3 +35,7 @@ education_levels:
 factor_labels:
   high_threshold: 0.70
   medium_threshold: 0.40
+
+# Live session configuration
+live_session:
+  no_reply_timeout_seconds: 10.0
