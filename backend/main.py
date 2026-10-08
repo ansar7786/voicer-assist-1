@@ -28,7 +28,7 @@ from backend.schema import (
 from backend.engine import compute_pathways, recompute_pathways
 from backend.session_store import get_session
 
-app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 4")
+app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,7 +64,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "phase": 4,
+        "phase": 5,
         "model": model,
         "has_api_key": bool(api_key),
         "db_initialized": db_ready,
@@ -191,6 +191,64 @@ def get_session_profile(session_id: str):
         "confidence": session.profile.get("_confidence", {}),
         "confirmed": session.confirmed,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/explain — rephrase engine reasons
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ExplainRequest(BaseModel):
+    reasons: Optional[list[str]] = None
+    factors: Optional[list[dict]] = None
+    pathway_name: Optional[str] = None
+    user_profile: Optional[dict] = None
+    language: Optional[str] = "en"
+
+
+class ExplainResponse(BaseModel):
+    explanation: str
+
+
+@app.post("/api/explain", response_model=ExplainResponse)
+def explain_endpoint(payload: ExplainRequest):
+    reasons = []
+    if payload.reasons:
+        reasons.extend([r.strip() for r in payload.reasons if r and r.strip()])
+    if payload.factors:
+        for f in payload.factors:
+            r = f.get("reason")
+            if r and r.strip():
+                reasons.append(r.strip())
+
+    fallback = "; ".join(reasons) if reasons else "Meets your criteria and preferences"
+    if not reasons:
+        return ExplainResponse(explanation=fallback)
+
+    import os
+    api_key = get_gemini_api_key()
+    text_model = os.getenv("GEMINI_TEXT_MODEL", "").strip()
+
+    if not api_key or not text_model:
+        return ExplainResponse(explanation=fallback)
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        prompt = (
+            f"You are a helpful PM-AJAY career guidance assistant. "
+            f"Rephrase the following factual qualification matching reasons into one friendly, clear spoken sentence in {payload.language}. "
+            f"Do not invent new courses, facts, or placement guarantees. Use only these reasons: {'; '.join(reasons)}"
+        )
+        resp = client.models.generate_content(
+            model=text_model,
+            contents=prompt,
+        )
+        if resp and resp.text:
+            return ExplainResponse(explanation=resp.text.strip())
+    except Exception:
+        pass
+
+    return ExplainResponse(explanation=fallback)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

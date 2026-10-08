@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import ProfileCard from "../components/ProfileCard";
+import PathwayCard from "../components/PathwayCard";
+import WhyDrawer from "../components/WhyDrawer";
+import WhatIfBar from "../components/WhatIfBar";
+import DiffBanner from "../components/DiffBanner";
 
 export default function Live() {
   const location = useLocation();
@@ -15,6 +19,14 @@ export default function Live() {
   const [profile, setProfile] = useState({});
   const [confidence, setConfidence] = useState({});
   const [confirmed, setConfirmed] = useState(false);
+
+  // Pathways & What-If state (Phase 5)
+  const [pathways, setPathways] = useState([]);
+  const [excludedPathways, setExcludedPathways] = useState([]);
+  const [diff, setDiff] = useState(null);
+  const [constraints, setConstraints] = useState({});
+  const [selectedWhyPathway, setSelectedWhyPathway] = useState(null);
+  const [isUnconfirmedPreview, setIsUnconfirmedPreview] = useState(false);
 
   // Conversation UI
   const [transcripts, setTranscripts] = useState([]);
@@ -103,6 +115,35 @@ export default function Live() {
     setConfidence((prev) => ({ ...prev, [field]: "stated" }));
   }, []);
 
+  // ── What-If constraint handlers ───────────────────────────────────────────
+
+  const handleConstraintChange = async (newConstraints) => {
+    setConstraints(newConstraints);
+    try {
+      const res = await fetch("/api/recompute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: profile || {},
+          previous_pathway_ids: pathways.map((p) => p.id),
+          constraints: newConstraints,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPathways(data.pathways || []);
+        setExcludedPathways(data.excluded || []);
+        setDiff(data.diff || null);
+      }
+    } catch (err) {
+      console.error("Recompute error:", err);
+    }
+  };
+
+  const handleResetConstraints = async () => {
+    handleConstraintChange({});
+  };
+
   // ── Start session ──────────────────────────────────────────────────────────
 
   const startSession = async () => {
@@ -111,11 +152,17 @@ export default function Live() {
     setIsMuted(false);
     isMutedRef.current = false;
 
-    // Only clear profile if starting afresh without an existing session id
+    // Only clear profile and pathways if starting afresh without an existing session id
     if (!sessionId) {
       setProfile({});
       setConfidence({});
       setConfirmed(false);
+      setPathways([]);
+      setExcludedPathways([]);
+      setDiff(null);
+      setConstraints({});
+      setSelectedWhyPathway(null);
+      setIsUnconfirmedPreview(false);
     }
 
     try {
@@ -209,6 +256,16 @@ export default function Live() {
               setProfile(data.profile || {});
               setConfidence(data.confidence || {});
               setConfirmed(data.confirmed || false);
+              break;
+            case "pathways":
+              setPathways(data.pathways || []);
+              setExcludedPathways(data.excluded || []);
+              setIsUnconfirmedPreview(Boolean(data.unconfirmed));
+              break;
+            case "diff":
+              setDiff(data.diff || null);
+              if (data.pathways) setPathways(data.pathways);
+              if (data.excluded) setExcludedPathways(data.excluded);
               break;
             case "error":
               setErrorState({
@@ -631,6 +688,61 @@ export default function Live() {
           )}
         </div>
       </div>
+
+      {/* ── Pathways and What-If Section (Phase 5) ── */}
+      {(pathways.length > 0 || diff || Object.keys(constraints).length > 0) && (
+        <div style={{ marginTop: "2rem", borderTop: "1px solid #e2e8f0", paddingTop: "1.5rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
+            <div>
+              <h2 style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#0f172a", margin: 0 }}>
+                Recommended Livelihood Pathways
+              </h2>
+              <p style={{ fontSize: "0.85rem", color: "#64748b", margin: "0.25rem 0 0 0" }}>
+                Tailored based on your stated background, constraints, and verified local opportunities.
+              </p>
+            </div>
+            {isUnconfirmedPreview && (
+              <span style={{
+                fontSize: "0.75rem", backgroundColor: "#fef3c7", color: "#92400e",
+                border: "1px solid #fcd34d", padding: "0.25rem 0.6rem", borderRadius: "9999px",
+                fontWeight: 600, display: "inline-flex", alignItems: "center", gap: "0.25rem"
+              }}>
+                <span>⚠️</span> Unconfirmed Profile Preview
+              </span>
+            )}
+          </div>
+
+          {/* What-If Simulation Bar */}
+          <WhatIfBar
+            constraints={constraints}
+            onConstraintChange={handleConstraintChange}
+            onReset={handleResetConstraints}
+          />
+
+          {/* Diff Banner */}
+          <DiffBanner diff={diff} excluded={excludedPathways} />
+
+          {/* Pathway Cards Grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
+            {pathways.map((pw) => (
+              <PathwayCard
+                key={pw.id}
+                pathway={pw}
+                onSelectWhy={(p) => setSelectedWhyPathway(p)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* WhyDrawer */}
+      {selectedWhyPathway && (
+        <WhyDrawer
+          pathway={selectedWhyPathway}
+          profile={profile}
+          onClose={() => setSelectedWhyPathway(null)}
+        />
+      )}
     </div>
   );
 }

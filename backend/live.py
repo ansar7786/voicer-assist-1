@@ -26,9 +26,13 @@ from backend.tools import (
     handle_ping,
     handle_update_profile,
     handle_confirm_profile,
+    handle_get_pathways,
+    handle_set_constraint,
     PING_DECLARATION,
     UPDATE_PROFILE_DECLARATION,
     CONFIRM_PROFILE_DECLARATION,
+    GET_PATHWAYS_DECLARATION,
+    SET_CONSTRAINT_DECLARATION,
 )
 
 # ---------------------------------------------------------------------------
@@ -102,7 +106,13 @@ def get_update_profile_scheduling() -> types.FunctionResponseScheduling:
 
 
 def get_tool_behavior(name: str) -> str:
-    for decl in (PING_DECLARATION, UPDATE_PROFILE_DECLARATION, CONFIRM_PROFILE_DECLARATION):
+    for decl in (
+        PING_DECLARATION,
+        UPDATE_PROFILE_DECLARATION,
+        CONFIRM_PROFILE_DECLARATION,
+        GET_PATHWAYS_DECLARATION,
+        SET_CONSTRAINT_DECLARATION,
+    ):
         if decl.get("name") == name:
             return decl.get("behavior", "BLOCKING")
     return "BLOCKING"
@@ -138,6 +148,8 @@ def get_live_config(handle: Optional[str] = None) -> types.LiveConnectConfig:
                     _make_function_declaration(PING_DECLARATION),
                     _make_function_declaration(UPDATE_PROFILE_DECLARATION),
                     _make_function_declaration(CONFIRM_PROFILE_DECLARATION),
+                    _make_function_declaration(GET_PATHWAYS_DECLARATION),
+                    _make_function_declaration(SET_CONSTRAINT_DECLARATION),
                 ]
             )
         ],
@@ -592,7 +604,7 @@ async def handle_live_session(websocket: WebSocket):
                                         logger.info("TRACE: tool_call | name: %s | time: %.3f", fc.name, time.time())
                                     logger.info("EVENT: tool_call_received | count: %d | time: %.3f",
                                                 len(tc.function_calls), time.time())
-                                    has_blocking = any(fc.name in ("confirm_profile", "ping") for fc in tc.function_calls)
+                                    has_blocking = any(fc.name in ("confirm_profile", "ping", "get_pathways", "set_constraint") for fc in tc.function_calls)
                                     if has_blocking:
                                         await websocket.send_json({"type": "state", "value": "thinking"})
                                     tool_responses = []
@@ -644,6 +656,27 @@ async def handle_live_session(websocket: WebSocket):
                                                         "profile": profile_export,
                                                         "confidence": confidence_map,
                                                         "confirmed": True,
+                                                    })
+                                                    _persist_profile(session)
+
+                                            elif fn_name == "get_pathways":
+                                                resp_data = handle_get_pathways(args, session)
+                                                if resp_data.get("ok"):
+                                                    await session.push("pathways", {
+                                                        "pathways": resp_data["pathways"],
+                                                        "excluded": resp_data["excluded"],
+                                                        "unconfirmed": resp_data["unconfirmed"],
+                                                    })
+                                                    _persist_profile(session)
+
+                                            elif fn_name == "set_constraint":
+                                                resp_data = handle_set_constraint(args, session)
+                                                if resp_data.get("ok"):
+                                                    await session.push("diff", {
+                                                        "diff": resp_data["diff"],
+                                                        "pathways": resp_data["pathways"],
+                                                        "excluded": resp_data["excluded"],
+                                                        "constraints": session.constraints,
                                                     })
                                                     _persist_profile(session)
 

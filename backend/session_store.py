@@ -52,6 +52,9 @@ class SessionState:
     # Confirmation state
     confirmed: bool = False
 
+    # Previous pathways (for what-if diffing)
+    previous_pathways: List[Any] = field(default_factory=list)
+
     # Async callbacks (registered by live.py to push WS events)
     # Signature: async (event_type: str, payload: dict) -> None
     push_callbacks: List[Callable] = field(default_factory=list)

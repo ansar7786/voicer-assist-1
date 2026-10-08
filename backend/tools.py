@@ -16,7 +16,10 @@ unmapped=True and never feed ranking.
 The blocklist filter runs on all free-text fields; blocked text is
 dropped silently (only "blocked field" is logged, never the content).
 """
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.session_store import (
     SessionState,
@@ -175,6 +178,61 @@ CONFIRM_PROFILE_DECLARATION = {
             },
         },
         "required": ["summary_spoken"],
+    },
+    "behavior": "BLOCKING",
+}
+
+GET_PATHWAYS_DECLARATION = {
+    "name": "get_pathways",
+    "description": (
+        "Fetch top 3 feasible livelihood and skill training pathways based on the user's profile. "
+        "Call when the user asks to see pathways or right after profile confirmation. "
+        "Returns short structured text with pathway names, durations, one-line reasons, and opportunity status."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "location_block": {
+                "type": "STRING",
+                "description": "Optional location block for center proximity matching",
+            },
+        },
+    },
+    "behavior": "BLOCKING",
+}
+
+SET_CONSTRAINT_DECLARATION = {
+    "name": "set_constraint",
+    "description": (
+        "Set what-if constraints (e.g. max_training_months, mobility, work_preference, time_available) "
+        "or reset them, and recompute pathways with an immediate diff explaining which pathways dropped, "
+        "were added, or were kept and why. Call when user states a restriction (e.g. 'cannot travel', "
+        "'max 3 months', 'prefer wage work') or asks to reset."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "max_training_months": {
+                "type": "INTEGER",
+                "description": "Maximum training duration in months (1 to 12)",
+            },
+            "mobility": {
+                "type": "STRING",
+                "description": "Allowed travel: home_only, within_village, within_block, anywhere",
+            },
+            "work_preference": {
+                "type": "STRING",
+                "description": "Preferred work route: self, wage, either",
+            },
+            "time_available": {
+                "type": "STRING",
+                "description": "Time availability: full_time, part_time, weekends",
+            },
+            "reset": {
+                "type": "BOOLEAN",
+                "description": "Set to true to clear all constraints back to baseline",
+            },
+        },
     },
     "behavior": "BLOCKING",
 }
@@ -539,3 +597,176 @@ def _missing_priority(session: SessionState) -> List[str]:
         "work_preference", "interests",
     ]
     return [f for f in priority if f not in session.profile or session.profile[f] is None]
+
+
+def handle_get_pathways(args: Dict[str, Any], session: SessionState) -> Dict[str, Any]:
+    from backend.schema import ProfileSchema, ConstraintSchema
+    from backend.engine import compute_pathways
+
+    try:
+        is_unconfirmed = not session.confirmed
+
+        clean_profile = {k: v for k, v in session.profile.items() if not k.startswith("_")}
+        if args.get("location_block"):
+            clean_profile["location_block"] = args["location_block"].strip()
+
+        profile_obj = ProfileSchema(**clean_profile)
+        constraints_obj = ConstraintSchema(**session.constraints) if session.constraints else None
+
+        result = compute_pathways(profile_obj, constraints_obj)
+        session.previous_pathways = result.pathways
+
+        # Build short structured text summary (NO scores!)
+        lines = []
+        if is_unconfirmed:
+            lines.append("UNCONFIRMED PREVIEW (profile summary not yet confirmed by user):")
+
+        if not result.pathways:
+            lines.append("No feasible pathways found matching your current profile.")
+            if result.excluded:
+                lines.append(f"Excluded: {len(result.excluded)} qualifications did not match your constraints.")
+        else:
+            for i, p in enumerate(result.pathways, 1):
+                factor_reasons = [f.reason for f in p.factors if f.label in ("High", "Medium") and f.reason]
+                one_line_reason = factor_reasons[0] if factor_reasons else f"Strong overall fit for {p.trade}"
+                opp_status = getattr(p, "opportunity_status", None) or "No verified opportunity found"
+                lines.append(
+                    f"{i}. {p.trade.title()} - {p.name} ({p.duration_months} mo): "
+                    f"{one_line_reason}. Opportunity: {opp_status}"
+                )
+
+        summary_text = "\n".join(lines)
+
+        return {
+            "ok": True,
+            "unconfirmed": is_unconfirmed,
+            "pathways_summary": summary_text,
+            "text": summary_text,
+            "pathways": [p.model_dump() for p in result.pathways],
+            "excluded": [e.model_dump() for e in result.excluded],
+            "count": len(result.pathways),
+        }
+    except Exception as e:
+        logger.error("EVENT: tool_error | tool: get_pathways | exc: %s", type(e).__name__)
+        return {
+            "error": "tool_error",
+            "message": "get_pathways execution failed",
+            "text": "get_pathways execution failed",
+            "recoverable": True,
+        }
+
+
+def handle_set_constraint(args: Dict[str, Any], session: SessionState) -> Dict[str, Any]:
+    from backend.schema import ProfileSchema, ConstraintSchema
+    from backend.engine import recompute_pathways
+
+    try:
+        is_reset = bool(args.get("reset"))
+        if is_reset:
+            session.constraints = {}
+        else:
+            if "max_training_months" in args and args["max_training_months"] is not None:
+                m = args["max_training_months"]
+                if not isinstance(m, int) or m < 1 or m > 12:
+                    return {
+                        "error": "invalid_value",
+                        "field": "max_training_months",
+                        "message": "max_training_months must be an integer between 1 and 12",
+                        "text": "max_training_months must be an integer between 1 and 12",
+                        "recoverable": True,
+                    }
+                session.constraints["max_training_months"] = m
+
+            if "mobility" in args and args["mobility"]:
+                norm_mob = normalize_mobility(args["mobility"]) or args["mobility"]
+                if norm_mob not in VALID_MOBILITY:
+                    return {
+                        "error": "invalid_value",
+                        "field": "mobility",
+                        "message": f"mobility must be one of: {sorted(VALID_MOBILITY)}",
+                        "text": f"Invalid mobility. Must be one of: {sorted(VALID_MOBILITY)}",
+                        "allowed_values": sorted(VALID_MOBILITY),
+                        "recoverable": True,
+                    }
+                session.constraints["mobility"] = norm_mob
+
+            if "work_preference" in args and args["work_preference"]:
+                norm_wp = normalize_work_preference(args["work_preference"]) or args["work_preference"]
+                if norm_wp not in VALID_WORK_PREFERENCE:
+                    return {
+                        "error": "invalid_value",
+                        "field": "work_preference",
+                        "message": f"work_preference must be one of: {sorted(VALID_WORK_PREFERENCE)}",
+                        "text": f"Invalid work_preference. Must be one of: {sorted(VALID_WORK_PREFERENCE)}",
+                        "allowed_values": sorted(VALID_WORK_PREFERENCE),
+                        "recoverable": True,
+                    }
+                session.constraints["work_preference"] = norm_wp
+
+            if "time_available" in args and args["time_available"]:
+                ta = str(args["time_available"]).strip().lower()
+                if ta not in VALID_TIME_AVAILABLE:
+                    return {
+                        "error": "invalid_value",
+                        "field": "time_available",
+                        "message": f"time_available must be one of: {sorted(VALID_TIME_AVAILABLE)}",
+                        "text": f"Invalid time_available. Must be one of: {sorted(VALID_TIME_AVAILABLE)}",
+                        "allowed_values": sorted(VALID_TIME_AVAILABLE),
+                        "recoverable": True,
+                    }
+                session.constraints["time_available"] = ta
+
+        clean_profile = {k: v for k, v in session.profile.items() if not k.startswith("_")}
+        profile_obj = ProfileSchema(**clean_profile)
+        constraints_obj = ConstraintSchema(**session.constraints) if session.constraints else None
+
+        previous_ids = [p.id for p in session.previous_pathways] if session.previous_pathways else []
+
+        result = recompute_pathways(
+            profile=profile_obj,
+            previous_pathway_ids=previous_ids,
+            constraints=constraints_obj,
+        )
+        session.previous_pathways = result.pathways
+
+        # Build short structured diff summary text (NO scores!)
+        lines = []
+        if is_reset:
+            lines.append("Reset all simulated constraints.")
+        lines.append("Diff summary:")
+        if result.diff.removed:
+            lines.append("Dropped:")
+            for item in result.diff.removed:
+                lines.append(f"- {item.name}: {item.reason}")
+        if result.diff.added:
+            lines.append("Added to top 3:")
+            for item in result.diff.added:
+                lines.append(f"- {item.name}: {item.reason}")
+        if result.diff.kept:
+            lines.append("Kept:")
+            for item in result.diff.kept:
+                lines.append(f"- {item.name}: {item.reason}")
+
+        lines.append("Current Top Pathways:")
+        for i, p in enumerate(result.pathways, 1):
+            opp_status = getattr(p, "opportunity_status", None) or "No verified opportunity found"
+            lines.append(f"{i}. {p.trade.title()} - {p.name} ({p.duration_months} mo). Opportunity: {opp_status}")
+
+        summary_text = "\n".join(lines)
+
+        return {
+            "ok": True,
+            "diff_summary": summary_text,
+            "text": summary_text,
+            "diff": result.diff.model_dump(),
+            "pathways": [p.model_dump() for p in result.pathways],
+            "excluded": [e.model_dump() for e in result.excluded],
+            "constraints": session.constraints,
+        }
+    except Exception as e:
+        logger.error("EVENT: tool_error | tool: set_constraint | exc: %s", type(e).__name__)
+        return {
+            "error": "tool_error",
+            "message": "set_constraint execution failed",
+            "recoverable": True,
+        }
