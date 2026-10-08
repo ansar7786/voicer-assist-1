@@ -4,15 +4,15 @@ export default function PathwayCard({ pathway, onSelectWhy }) {
   if (!pathway) return null;
 
   const {
-    id,
-    name,
-    trade,
-    nsqf_level,
-    duration_months,
-    route,
-    delivery_mode,
+    id = "pathway",
+    name = "Livelihood Pathway",
+    trade = "general",
+    nsqf_level = 1,
+    duration_months = 3,
+    route = "either",
+    delivery_mode = "either",
+    nearest_centre = null,
     training_centres = [],
-    opportunity,
     factors = [],
   } = pathway;
 
@@ -26,10 +26,22 @@ export default function PathwayCard({ pathway, onSelectWhy }) {
       ? "Centre Based"
       : "Home / Centre";
 
-  const oppStatus = opportunity?.status || "No verified opportunity found";
-  const isOppVerified = oppStatus.startsWith("Verified:");
+  // Handle both pathway.opportunity_status and pathway.opportunity object
+  const oppStatus =
+    pathway.opportunity_status ||
+    pathway.opportunity?.status ||
+    "No verified opportunity found";
+
+  const isOppVerified = String(oppStatus).startsWith("Verified:");
   const isNoOpp = oppStatus === "No verified opportunity found";
-  const isOppSample = Boolean(opportunity?.is_sample);
+  const isOppSample = Boolean(
+    pathway.opportunity?.is_sample ||
+    (typeof oppStatus === "string" && oppStatus.toLowerCase().includes("sample"))
+  );
+
+  // Handle both nearest_centre and training_centres
+  const centre = nearest_centre || (Array.isArray(training_centres) && training_centres[0]) || null;
+  const isCentreSample = Boolean(centre?.is_sample || centre?.sample);
 
   return (
     <div
@@ -67,20 +79,20 @@ export default function PathwayCard({ pathway, onSelectWhy }) {
         <div className="text-xs text-slate-600 mb-2.5 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
           <div className="font-semibold text-slate-700 flex items-center justify-between mb-1">
             <span>Training Centre</span>
-            {training_centres.length > 0 && training_centres[0].is_sample && (
+            {isCentreSample && (
               <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-mono">
                 Sample Centre
               </span>
             )}
           </div>
-          {training_centres.length > 0 ? (
+          {centre ? (
             <div className="text-slate-600">
-              <span className="font-medium text-slate-800">{training_centres[0].name}</span>
-              {training_centres[0].block && (
-                <span className="text-slate-500"> ({training_centres[0].block})</span>
+              <span className="font-medium text-slate-800">{centre.name}</span>
+              {centre.block && (
+                <span className="text-slate-500"> ({centre.block})</span>
               )}
-              {training_centres[0].seats && (
-                <span className="text-slate-500"> • {training_centres[0].seats} seats</span>
+              {centre.seats && (
+                <span className="text-slate-500"> • {centre.seats} seats</span>
               )}
             </div>
           ) : (
@@ -104,35 +116,41 @@ export default function PathwayCard({ pathway, onSelectWhy }) {
               <span>No verified opportunity found</span>
             </div>
           ) : (
-            <div className={`p-2 rounded-md text-xs font-medium border ${
-              isOppVerified
-                ? "bg-emerald-50 border-emerald-200 text-emerald-900"
-                : "bg-blue-50 border-blue-200 text-blue-900"
-            }`}>
+            <div
+              className={`p-2 rounded-md text-xs font-medium border ${
+                isOppVerified
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-900"
+                  : "bg-blue-50 border-blue-200 text-blue-900"
+              }`}
+            >
               {oppStatus}
             </div>
           )}
         </div>
 
         {/* High-match factor badges preview */}
-        {factors.length > 0 && (
+        {Array.isArray(factors) && factors.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-3">
             {factors
-              .filter((f) => f.label === "High" || f.label === "Medium")
+              .filter((f) => f && (f.label === "High" || f.label === "Medium"))
               .slice(0, 3)
-              .map((f, idx) => (
-                <span
-                  key={idx}
-                  className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                    f.label === "High"
-                      ? "bg-green-100 text-green-800"
-                      : "bg-blue-100 text-blue-800"
-                  }`}
-                  title={f.reason}
-                >
-                  ✓ {f.name.replace("_", " ")}
-                </span>
-              ))}
+              .map((f, idx) => {
+                const rawName = f.factor || f.name || "Factor";
+                const factorDisplay = String(rawName).replace(/_/g, " ");
+                return (
+                  <span
+                    key={idx}
+                    className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                      f.label === "High"
+                        ? "bg-green-100 text-green-800"
+                        : "bg-blue-100 text-blue-800"
+                    }`}
+                    title={f.reason || ""}
+                  >
+                    ✓ {factorDisplay}
+                  </span>
+                );
+              })}
           </div>
         )}
       </div>

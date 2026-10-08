@@ -1,10 +1,33 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, Component } from "react";
 import { useLocation } from "react-router-dom";
 import ProfileCard from "../components/ProfileCard";
 import PathwayCard from "../components/PathwayCard";
 import WhyDrawer from "../components/WhyDrawer";
 import WhatIfBar from "../components/WhatIfBar";
 import DiffBanner from "../components/DiffBanner";
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, errorInfo) {
+    console.error("ErrorBoundary caught error:", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: "1rem", backgroundColor: "#fef2f2", color: "#991b1b", border: "1px solid #fecaca", borderRadius: "8px", margin: "1rem 0" }}>
+          <strong>Error rendering section:</strong> {this.state.error?.message || "Unexpected UI error"}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function Live() {
   const location = useLocation();
@@ -690,59 +713,61 @@ export default function Live() {
       </div>
 
       {/* ── Pathways and What-If Section (Phase 5) ── */}
-      {(pathways.length > 0 || diff || Object.keys(constraints).length > 0) && (
-        <div style={{ marginTop: "2rem", borderTop: "1px solid #e2e8f0", paddingTop: "1.5rem" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
-            <div>
-              <h2 style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#0f172a", margin: 0 }}>
-                Recommended Livelihood Pathways
-              </h2>
-              <p style={{ fontSize: "0.85rem", color: "#64748b", margin: "0.25rem 0 0 0" }}>
-                Tailored based on your stated background, constraints, and verified local opportunities.
-              </p>
+      <ErrorBoundary>
+        {(pathways.length > 0 || diff || Object.keys(constraints).length > 0) && (
+          <div style={{ marginTop: "2rem", borderTop: "1px solid #e2e8f0", paddingTop: "1.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem", flexWrap: "wrap", gap: "0.5rem" }}>
+              <div>
+                <h2 style={{ fontSize: "1.3rem", fontWeight: "bold", color: "#0f172a", margin: 0 }}>
+                  Recommended Livelihood Pathways
+                </h2>
+                <p style={{ fontSize: "0.85rem", color: "#64748b", margin: "0.25rem 0 0 0" }}>
+                  Tailored based on your stated background, constraints, and verified local opportunities.
+                </p>
+              </div>
+              {isUnconfirmedPreview && (
+                <span style={{
+                  fontSize: "0.75rem", backgroundColor: "#fef3c7", color: "#92400e",
+                  border: "1px solid #fcd34d", padding: "0.25rem 0.6rem", borderRadius: "9999px",
+                  fontWeight: 600, display: "inline-flex", alignItems: "center", gap: "0.25rem"
+                }}>
+                  <span>⚠️</span> Unconfirmed Profile Preview
+                </span>
+              )}
             </div>
-            {isUnconfirmedPreview && (
-              <span style={{
-                fontSize: "0.75rem", backgroundColor: "#fef3c7", color: "#92400e",
-                border: "1px solid #fcd34d", padding: "0.25rem 0.6rem", borderRadius: "9999px",
-                fontWeight: 600, display: "inline-flex", alignItems: "center", gap: "0.25rem"
-              }}>
-                <span>⚠️</span> Unconfirmed Profile Preview
-              </span>
-            )}
-          </div>
 
-          {/* What-If Simulation Bar */}
-          <WhatIfBar
-            constraints={constraints}
-            onConstraintChange={handleConstraintChange}
-            onReset={handleResetConstraints}
+            {/* What-If Simulation Bar */}
+            <WhatIfBar
+              constraints={constraints}
+              onConstraintChange={handleConstraintChange}
+              onReset={handleResetConstraints}
+            />
+
+            {/* Diff Banner */}
+            <DiffBanner diff={diff} excluded={excludedPathways} />
+
+            {/* Pathway Cards Grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
+              {pathways.map((pw) => (
+                <PathwayCard
+                  key={pw.id}
+                  pathway={pw}
+                  onSelectWhy={(p) => setSelectedWhyPathway(p)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* WhyDrawer */}
+        {selectedWhyPathway && (
+          <WhyDrawer
+            pathway={selectedWhyPathway}
+            profile={profile}
+            onClose={() => setSelectedWhyPathway(null)}
           />
-
-          {/* Diff Banner */}
-          <DiffBanner diff={diff} excluded={excludedPathways} />
-
-          {/* Pathway Cards Grid */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "1rem" }}>
-            {pathways.map((pw) => (
-              <PathwayCard
-                key={pw.id}
-                pathway={pw}
-                onSelectWhy={(p) => setSelectedWhyPathway(p)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* WhyDrawer */}
-      {selectedWhyPathway && (
-        <WhyDrawer
-          pathway={selectedWhyPathway}
-          profile={profile}
-          onClose={() => setSelectedWhyPathway(null)}
-        />
-      )}
+        )}
+      </ErrorBoundary>
     </div>
   );
 }
