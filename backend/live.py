@@ -62,10 +62,16 @@ def get_gemini_live_model() -> str:
     return model
 
 
-def load_system_instruction() -> str:
+def load_system_instruction_and_greeting() -> tuple[str, str]:
     if SYSTEM_INSTRUCTION_PATH.exists():
         with open(SYSTEM_INSTRUCTION_PATH, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            content = f.read().strip()
+        if "[INITIAL_GREETING]" in content:
+            parts = content.split("[INITIAL_GREETING]", 1)
+            sys_text = parts[0].replace("[SYSTEM_INSTRUCTION]", "").strip()
+            greeting = parts[1].strip()
+            return sys_text, greeting
+        return content, ""
     return (
         "You are a friendly voice assistant helping a person in rural India explore "
         "livelihood and skill training options. You speak and understand Telugu, Hindi, "
@@ -73,8 +79,33 @@ def load_system_instruction() -> str:
         "Call update_profile silently whenever the user states a clear fact about "
         "themselves (education, skills, work experience, interests, mobility, income urgency). "
         "After you have gathered enough information, read the profile back in simple words "
-        "and call confirm_profile once the user says yes."
+        "and call confirm_profile once the user says yes.",
+        "Please greet the person warmly in 1 short sentence and ask what skills or training pathways they would like to explore today.",
     )
+
+
+def load_system_instruction() -> str:
+    sys_text, _ = load_system_instruction_and_greeting()
+    return sys_text
+
+
+def load_initial_greeting() -> str:
+    _, greeting = load_system_instruction_and_greeting()
+    return greeting
+
+
+def get_update_profile_scheduling() -> types.FunctionResponseScheduling:
+    sched_env = os.getenv("LIVE_UPDATE_SCHEDULING", "WHEN_IDLE").strip().upper()
+    if sched_env == "SILENT":
+        return types.FunctionResponseScheduling.SILENT
+    return types.FunctionResponseScheduling.WHEN_IDLE
+
+
+def get_tool_behavior(name: str) -> str:
+    for decl in (PING_DECLARATION, UPDATE_PROFILE_DECLARATION, CONFIRM_PROFILE_DECLARATION):
+        if decl.get("name") == name:
+            return decl.get("behavior", "BLOCKING")
+    return "BLOCKING"
 
 
 def _make_function_declaration(d: dict) -> types.FunctionDeclaration:
@@ -333,8 +364,11 @@ async def handle_live_session(websocket: WebSocket):
 
     client_queue: asyncio.Queue = asyncio.Queue()
 
+    ws_close_code: Optional[int] = None
+    ws_close_reason: Optional[str] = None
+
     async def client_reader():
-        nonlocal client_disconnected, session
+        nonlocal client_disconnected, session, ws_close_code, ws_close_reason
         try:
             while True:
                 message = await websocket.receive()
@@ -360,11 +394,19 @@ async def handle_live_session(websocket: WebSocket):
                             session.register_push(push_to_browser)
                             logger.info("EVENT: session_rebound | id: %s | time: %.3f", session.session_id, time.time())
                         logger.info("EVENT: client_start | time: %.3f", time.time())
-        except (WebSocketDisconnect, asyncio.CancelledError):
+        except WebSocketDisconnect as e:
+            ws_close_code = getattr(e, "code", 1000)
+            ws_close_reason = getattr(e, "reason", "") or ""
+            logger.info("TRACE: websocket_close | code: %s | reason: %s | time: %.3f",
+                        ws_close_code, ws_close_reason, time.time())
             client_disconnected = True
             await client_queue.put({"type": "disconnect"})
-        except Exception:
-            logger.error("EVENT: client_reader_error | time: %.3f", time.time())
+        except asyncio.CancelledError:
+            client_disconnected = True
+            await client_queue.put({"type": "disconnect"})
+        except Exception as e:
+            exc_type = type(e).__name__
+            logger.error("EVENT: client_reader_error | exc_type: %s | time: %.3f", exc_type, time.time())
             client_disconnected = True
             await client_queue.put({"type": "disconnect"})
 
@@ -415,6 +457,17 @@ async def handle_live_session(websocket: WebSocket):
 
                     async def send_to_gemini():
                         nonlocal client_disconnected, should_reconnect
+                        initial_greeting = load_initial_greeting()
+                        if not session_handle and initial_greeting:
+                            logger.info("TRACE: initial_greeting_turn | time: %.3f", time.time())
+                            start_watchdog()
+                            await live_session.send_client_content(
+                                turns=types.Content(
+                                    role="user",
+                                    parts=[types.Part(text=initial_greeting)],
+                                ),
+                                turn_complete=True,
+                            )
                         while True:
                             item = await client_queue.get()
                             itype = item.get("type")
@@ -441,9 +494,15 @@ async def handle_live_session(websocket: WebSocket):
 
                     async def receive_from_gemini():
                         nonlocal session_handle, should_reconnect
+                        turn_audio_chunks = 0
                         async for response in live_session.receive():
+                            # Setup complete trace
+                            if getattr(response, "setup_complete", None):
+                                logger.info("TRACE: setup_complete | time: %.3f", time.time())
+
                             # Session resumption handle
                             if response.session_resumption_update:
+                                logger.info("TRACE: session_resumption_update | time: %.3f", time.time())
                                 sru = response.session_resumption_update
                                 if sru.new_handle:
                                     session_handle = sru.new_handle
@@ -451,6 +510,7 @@ async def handle_live_session(websocket: WebSocket):
 
                             # GoAway
                             if response.go_away:
+                                logger.info("TRACE: go_away | time: %.3f", time.time())
                                 logger.info("EVENT: go_away_received | time: %.3f", time.time())
                                 await websocket.send_json({"type": "state", "value": "reconnecting"})
                                 should_reconnect = True
@@ -460,12 +520,16 @@ async def handle_live_session(websocket: WebSocket):
                             sc = response.server_content
                             if sc:
                                 if sc.interrupted:
+                                    logger.info("TRACE: interrupted | time: %.3f", time.time())
                                     logger.info("EVENT: server_interrupted | time: %.3f", time.time())
+                                    turn_audio_chunks = 0
                                     await websocket.send_json({"type": "interrupted"})
                                     await websocket.send_json({"type": "state", "value": "listening"})
 
                                 if sc.input_transcription and sc.input_transcription.text:
                                     is_final = bool(sc.input_transcription.finished)
+                                    logger.info("TRACE: input_transcription | finished: %s | time: %.3f",
+                                                is_final, time.time())
                                     await websocket.send_json({
                                         "type": "transcript",
                                         "role": "user",
@@ -477,6 +541,8 @@ async def handle_live_session(websocket: WebSocket):
 
                                 if sc.output_transcription and sc.output_transcription.text:
                                     reset_watchdog()
+                                    logger.info("TRACE: output_transcription | finished: %s | time: %.3f",
+                                                bool(sc.output_transcription.finished), time.time())
                                     await websocket.send_json({
                                         "type": "transcript",
                                         "role": "assistant",
@@ -486,11 +552,20 @@ async def handle_live_session(websocket: WebSocket):
 
                                 if sc.model_turn and sc.model_turn.parts:
                                     reset_watchdog()
+                                    audio_chunk_count = sum(
+                                        1 for part in sc.model_turn.parts
+                                        if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None)
+                                    )
+                                    if audio_chunk_count > 0:
+                                        turn_audio_chunks += audio_chunk_count
+                                        logger.info("TRACE: model_audio | chunk_count: %d | time: %.3f",
+                                                    turn_audio_chunks, time.time())
+
                                     for part in sc.model_turn.parts:
-                                        if part.inline_data and part.inline_data.data:
+                                        if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
                                             await websocket.send_json({"type": "state", "value": "speaking"})
                                             await websocket.send_bytes(part.inline_data.data)
-                                        if part.text:
+                                        if getattr(part, "text", None):
                                             await websocket.send_json({
                                                 "type": "transcript",
                                                 "role": "assistant",
@@ -499,6 +574,10 @@ async def handle_live_session(websocket: WebSocket):
                                             })
 
                                 if sc.turn_complete:
+                                    reset_watchdog()
+                                    logger.info("TRACE: turn_complete | audio_chunks: %d | time: %.3f",
+                                                turn_audio_chunks, time.time())
+                                    turn_audio_chunks = 0
                                     await websocket.send_json({"type": "turn_complete"})
                                     await websocket.send_json({"type": "state", "value": "listening"})
 
@@ -506,6 +585,8 @@ async def handle_live_session(websocket: WebSocket):
                             tc = response.tool_call
                             if tc and tc.function_calls:
                                 reset_watchdog()
+                                for fc in tc.function_calls:
+                                    logger.info("TRACE: tool_call | name: %s | time: %.3f", fc.name, time.time())
                                 logger.info("EVENT: tool_call_received | count: %d | time: %.3f",
                                             len(tc.function_calls), time.time())
                                 has_blocking = any(fc.name in ("confirm_profile", "ping") for fc in tc.function_calls)
@@ -592,12 +673,31 @@ async def handle_live_session(websocket: WebSocket):
                                         except Exception:
                                             pass
 
+                                    sched_val = (
+                                        get_update_profile_scheduling()
+                                        if fn_name == "update_profile"
+                                        else None
+                                    )
+                                    behavior_val = get_tool_behavior(fn_name)
+                                    sched_name = (
+                                        getattr(sched_val, "name", None)
+                                        or getattr(sched_val, "value", None)
+                                        or ("DEFAULT" if sched_val is None else str(sched_val))
+                                    )
+                                    logger.info(
+                                        "TRACE: tool_response | name: %s | behavior: %s | scheduling: %s | time: %.3f",
+                                        fn_name,
+                                        behavior_val,
+                                        sched_name,
+                                        time.time(),
+                                    )
+
                                     tool_responses.append(
                                         types.FunctionResponse(
                                             name=fn_name,
                                             id=fc.id,
                                             response=resp_data,
-                                            scheduling=types.FunctionResponseScheduling.SILENT if fn_name == "update_profile" else None,
+                                            scheduling=sched_val,
                                         )
                                     )
 
@@ -621,21 +721,30 @@ async def handle_live_session(websocket: WebSocket):
                         if t.exception():
                             raise t.exception()
 
+                    if not client_disconnected and not should_reconnect:
+                        raise ConnectionError("Live session stream closed unexpectedly by remote service")
+
             except Exception as e:
+                exc_type_name = type(e).__name__
                 err_info = classify_live_error(e)
-                logger.error("EVENT: error | code: %s | time: %.3f", err_info["code"], time.time())
-                if client_disconnected:
-                    break
-                try:
-                    await websocket.send_json({
-                        "type": "error",
-                        "code": err_info["code"],
-                        "message": err_info["message"],
-                        "fallback": err_info["fallback"],
-                    })
-                    await websocket.send_json({"type": "state", "value": "error"})
-                except Exception:
-                    pass
+                logger.error(
+                    "EVENT: relay_exception | exc_type: %s | code: %s | time: %.3f",
+                    exc_type_name,
+                    err_info["code"],
+                    time.time(),
+                )
+                if not client_disconnected:
+                    try:
+                        await websocket.send_json({
+                            "type": "error",
+                            "code": err_info["code"],
+                            "message": err_info["message"],
+                            "fallback": err_info["fallback"],
+                            "exc_type": exc_type_name,
+                        })
+                        await websocket.send_json({"type": "state", "value": "error"})
+                    except Exception:
+                        pass
                 break
 
             if not should_reconnect or client_disconnected:
@@ -647,6 +756,12 @@ async def handle_live_session(websocket: WebSocket):
         # Final profile persistence on disconnect
         if session.profile:
             _persist_profile(session)
+        logger.info(
+            "TRACE: websocket_close | code: %s | reason: %s | time: %.3f",
+            ws_close_code if ws_close_code is not None else 1000,
+            ws_close_reason or "",
+            time.time(),
+        )
         logger.info("EVENT: session_closed | time: %.3f", time.time())
         try:
             await websocket.close()

@@ -227,10 +227,35 @@ def test_two_consecutive_turns_with_tool_call_and_text_reply():
             tr = tool_resp_list[0]
             assert tr.name == "update_profile"
             assert tr.id == "call_turn1_123"
-            assert tr.scheduling == types.FunctionResponseScheduling.SILENT
+            assert tr.scheduling == types.FunctionResponseScheduling.WHEN_IDLE
 
             # Check session profile state was updated and persisted
             stored_sess = get_session(session_id)
             assert stored_sess is not None
             assert stored_sess.profile.get("education_level") == "10th"
             assert stored_sess.profile.get("interests") == ["tailoring"]
+
+
+def test_update_profile_scheduling_env_configurable():
+    import os
+    from backend.live import get_update_profile_scheduling
+
+    with patch.dict(os.environ, {"LIVE_UPDATE_SCHEDULING": "SILENT"}):
+        assert get_update_profile_scheduling() == types.FunctionResponseScheduling.SILENT
+
+    with patch.dict(os.environ, {"LIVE_UPDATE_SCHEDULING": "WHEN_IDLE"}):
+        assert get_update_profile_scheduling() == types.FunctionResponseScheduling.WHEN_IDLE
+
+    # Default without env set
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("LIVE_UPDATE_SCHEDULING", None)
+        assert get_update_profile_scheduling() == types.FunctionResponseScheduling.WHEN_IDLE
+
+
+def test_initial_greeting_loaded_from_system_instruction_file():
+    from backend.live import load_initial_greeting, load_system_instruction
+    greeting = load_initial_greeting()
+    sys_inst = load_system_instruction()
+    assert greeting != ""
+    assert "[INITIAL_GREETING]" not in sys_inst
+    assert "greet" in greeting.lower()
