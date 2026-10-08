@@ -1,17 +1,13 @@
 """
-Live session manager for Gemini Live API (Phase 3).
-Features:
-- Session resumption with in-memory handle tracking.
-- GoAway handling with graceful reconnection using session handle.
-- Context window compression with sliding window.
-- Audio input (PCM16 16kHz) and audio output (PCM16 24kHz) streaming.
-- Input and output audio transcription.
-- Typed text input via send_client_content(turn_complete=True).
-- Server interruption signaling for browser playback queue clearing (barge-in).
-- State events: connecting, listening, speaking, thinking, reconnecting, error.
-- System instruction loaded from backend/system_instruction.txt.
-- Privacy compliance: Logs contain ONLY event types and timings; never transcripts or audio.
-- Audio is NEVER written to disk.
+Live session manager for Gemini Live API (Phase 4).
+Extends Phase 3 with:
+- Per-WebSocket SessionState (session_store.py)
+- update_profile and confirm_profile tool routing (tools.py)
+- profile_update events pushed to the browser after every successful update
+- Blocklist applied inside tool handlers (no caste/religion/address/ID)
+- Transcripts NEVER stored in session or DB
+- Audio NEVER written to disk
+- Logs: event types and timings only
 """
 import os
 import time
@@ -25,7 +21,19 @@ from fastapi import WebSocket, WebSocketDisconnect
 from google import genai
 from google.genai import types
 
-# Setup audit logger for timings and event types ONLY
+from backend.session_store import create_session, delete_session, SessionState, get_session
+from backend.tools import (
+    handle_ping,
+    handle_update_profile,
+    handle_confirm_profile,
+    PING_DECLARATION,
+    UPDATE_PROFILE_DECLARATION,
+    CONFIRM_PROFILE_DECLARATION,
+)
+
+# ---------------------------------------------------------------------------
+# Audit logger  — event types and timings ONLY
+# ---------------------------------------------------------------------------
 logger = logging.getLogger("voicer_live")
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -40,42 +48,48 @@ SYSTEM_INSTRUCTION_PATH = Path(__file__).resolve().parent / "system_instruction.
 
 load_dotenv(dotenv_path=ENV_PATH)
 
+
 def get_gemini_api_key() -> str:
     load_dotenv(dotenv_path=ENV_PATH)
     return os.getenv("GEMINI_API_KEY", "").strip()
+
 
 def get_gemini_live_model() -> str:
     load_dotenv(dotenv_path=ENV_PATH)
     model = os.getenv("GEMINI_LIVE_MODEL", "").strip()
     if not model:
-        raise ValueError("GEMINI_LIVE_MODEL environment variable is not set. Please set it in .env.")
+        raise ValueError("GEMINI_LIVE_MODEL is not set in .env")
     return model
+
 
 def load_system_instruction() -> str:
     if SYSTEM_INSTRUCTION_PATH.exists():
         with open(SYSTEM_INSTRUCTION_PATH, "r", encoding="utf-8") as f:
             return f.read().strip()
     return (
-        "You are a friendly, conversational voice assistant helping a person in India. "
-        "You speak and understand Telugu, Hindi, and English. Keep replies natural and concise (1-2 sentences). "
-        "If the user says ping or mentions testing tools, call the ping tool immediately."
+        "You are a friendly voice assistant helping a person in rural India explore "
+        "livelihood and skill training options. You speak and understand Telugu, Hindi, "
+        "and English naturally. Keep replies short (1–2 sentences). "
+        "Call update_profile silently whenever the user states a clear fact about "
+        "themselves (education, skills, work experience, interests, mobility, income urgency). "
+        "After you have gathered enough information, read the profile back in simple words "
+        "and call confirm_profile once the user says yes."
     )
+
+
+def _make_function_declaration(d: dict) -> types.FunctionDeclaration:
+    """Convert our declaration dict to a FunctionDeclaration with behavior wired."""
+    kwargs = {
+        "name": d["name"],
+        "description": d["description"],
+        "parameters": d.get("parameters"),
+    }
+    if "behavior" in d and d["behavior"]:
+        kwargs["behavior"] = d["behavior"]
+    return types.FunctionDeclaration(**kwargs)
+
 
 def get_live_config(handle: Optional[str] = None) -> types.LiveConnectConfig:
-    ping_tool = types.FunctionDeclaration(
-        name="ping",
-        description="A dummy tool for health and connectivity verification. Call this tool whenever the user says ping or asks to test tools.",
-        parameters={
-            "type": "OBJECT",
-            "properties": {
-                "message": {
-                    "type": "STRING",
-                    "description": "Optional ping message or payload from user",
-                }
-            },
-        },
-    )
-
     sys_text = load_system_instruction()
 
     session_resumption = (
@@ -86,10 +100,16 @@ def get_live_config(handle: Optional[str] = None) -> types.LiveConnectConfig:
 
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
-        system_instruction=types.Content(
-            parts=[types.Part(text=sys_text)]
-        ),
-        tools=[types.Tool(function_declarations=[ping_tool])],
+        system_instruction=types.Content(parts=[types.Part(text=sys_text)]),
+        tools=[
+            types.Tool(
+                function_declarations=[
+                    _make_function_declaration(PING_DECLARATION),
+                    _make_function_declaration(UPDATE_PROFILE_DECLARATION),
+                    _make_function_declaration(CONFIRM_PROFILE_DECLARATION),
+                ]
+            )
+        ],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         context_window_compression=types.ContextWindowCompressionConfig(
@@ -98,6 +118,69 @@ def get_live_config(handle: Optional[str] = None) -> types.LiveConnectConfig:
         session_resumption=session_resumption,
     )
 
+
+# ---------------------------------------------------------------------------
+# Persist profile to DB (profile_json + edit_log rows only)
+# ---------------------------------------------------------------------------
+def _persist_profile(session: SessionState):
+    """Write profile JSON and new edit_log entries to the database.
+    Transcripts are NEVER written."""
+    try:
+        from backend.db import get_db_connection
+        import json as _json
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        now_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        # Upsert session row – only profile_json; transcript_json stays NULL always
+        cur.execute(
+            """
+            INSERT INTO sessions (id, created_at, language, transcript_json, profile_json,
+                                  constraints_json, consent_official_view)
+            VALUES (?, ?, ?, NULL, ?, ?, 0)
+            ON CONFLICT(id) DO UPDATE SET
+                profile_json = excluded.profile_json,
+                constraints_json = excluded.constraints_json
+            """,
+            (
+                session.session_id,
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(session.created_at)),
+                session.language,
+                session.to_profile_json(),
+                _json.dumps(session.constraints, ensure_ascii=False),
+            ),
+        )
+
+        # Write any unwritten field_history rows as edit_log entries
+        for entry in session.field_history:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO edit_log
+                    (session_id, field, old_value, new_value, actor, ts)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.session_id,
+                    entry["field"],
+                    _json.dumps(entry["old"], ensure_ascii=False) if entry["old"] is not None else None,
+                    _json.dumps(entry["new"], ensure_ascii=False),
+                    entry.get("source", "voice"),
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry["ts"])),
+                ),
+            )
+
+        conn.commit()
+        conn.close()
+        logger.info("EVENT: profile_persisted | session: %s | time: %.3f",
+                    session.session_id, time.time())
+    except Exception:
+        logger.error("EVENT: profile_persist_error | time: %.3f", time.time())
+
+
+# ---------------------------------------------------------------------------
+# Main WebSocket handler
+# ---------------------------------------------------------------------------
 async def handle_live_session(websocket: WebSocket):
     api_key = get_gemini_api_key()
     try:
@@ -113,18 +196,51 @@ async def handle_live_session(websocket: WebSocket):
         logger.error("EVENT: auth_missing | time: %.3f", time.time())
         await websocket.send_json({
             "type": "error",
-            "message": "GEMINI_API_KEY is not set in .env. Please configure your API key.",
+            "message": "GEMINI_API_KEY is not set in .env",
         })
         await websocket.send_json({"type": "state", "value": "error"})
         await websocket.close()
         return
 
+    # Reuse session if requested and present, else create new
+    req_session_id = websocket.query_params.get("session_id")
+    if req_session_id and get_session(req_session_id):
+        session = get_session(req_session_id)
+        logger.info("EVENT: session_resumed | id: %s | time: %.3f", session.session_id, time.time())
+    else:
+        session = create_session(language="te")
+
+    # Register push callback so tool handlers can emit events to browser
+    async def push_to_browser(event_type: str, payload: dict):
+        try:
+            await websocket.send_json({"type": event_type, **payload})
+        except Exception:
+            pass
+
+    session.register_push(push_to_browser)
+
+    # Send session_id to the browser so the UI can use it for PATCH requests
+    await websocket.send_json({"type": "session_id", "value": session.session_id})
+
+    # If the session already had profile fields, send profile_update immediately to hydrate client
+    if session.profile:
+        profile_export = {
+            k: v for k, v in session.profile.items()
+            if not k.startswith("_")
+        }
+        confidence_map = session.profile.get("_confidence", {})
+        await websocket.send_json({
+            "type": "profile_update",
+            "profile": profile_export,
+            "confidence": confidence_map,
+            "confirmed": session.confirmed,
+        })
+
     client = genai.Client(api_key=api_key)
     session_handle: Optional[str] = None
     client_disconnected = False
 
-    # Incoming message queue from WebSocket client
-    client_queue = asyncio.Queue()
+    client_queue: asyncio.Queue = asyncio.Queue()
 
     async def client_reader():
         nonlocal client_disconnected
@@ -145,11 +261,18 @@ async def handle_live_session(websocket: WebSocket):
                         if text_val:
                             await client_queue.put({"type": "text", "data": text_val})
                     elif msg_type == "start":
+                        lang = data.get("language_hint", "te")
+                        session.language = lang
+                        sid = data.get("session_id")
+                        if sid and sid != session.session_id and get_session(sid):
+                            session = get_session(sid)
+                            session.register_push(push_to_browser)
+                            logger.info("EVENT: session_rebound | id: %s | time: %.3f", session.session_id, time.time())
                         logger.info("EVENT: client_start | time: %.3f", time.time())
         except (WebSocketDisconnect, asyncio.CancelledError):
             client_disconnected = True
             await client_queue.put({"type": "disconnect"})
-        except Exception as e:
+        except Exception:
             logger.error("EVENT: client_reader_error | time: %.3f", time.time())
             client_disconnected = True
             await client_queue.put({"type": "disconnect"})
@@ -160,13 +283,13 @@ async def handle_live_session(websocket: WebSocket):
         while not client_disconnected:
             config = get_live_config(handle=session_handle)
             state_val = "reconnecting" if session_handle else "connecting"
-            logger.info("EVENT: %s | handle_present: %s | time: %.3f", state_val, bool(session_handle), time.time())
+            logger.info("EVENT: %s | time: %.3f", state_val, time.time())
             await websocket.send_json({"type": "state", "value": state_val})
 
             should_reconnect = False
 
             try:
-                async with client.aio.live.connect(model=live_model, config=config) as session:
+                async with client.aio.live.connect(model=live_model, config=config) as live_session:
                     logger.info("EVENT: session_connected | time: %.3f", time.time())
                     await websocket.send_json({"type": "state", "value": "listening"})
 
@@ -175,22 +298,19 @@ async def handle_live_session(websocket: WebSocket):
                         while True:
                             item = await client_queue.get()
                             itype = item.get("type")
-
                             if itype == "audio":
-                                pcm_bytes = item["data"]
-                                await session.send_realtime_input(
+                                await live_session.send_realtime_input(
                                     audio=types.Blob(
-                                        data=pcm_bytes,
+                                        data=item["data"],
                                         mime_type="audio/pcm;rate=16000",
                                     )
                                 )
                             elif itype == "text":
-                                text_val = item["data"]
                                 logger.info("EVENT: send_client_content | time: %.3f", time.time())
-                                await session.send_client_content(
+                                await live_session.send_client_content(
                                     turns=types.Content(
                                         role="user",
-                                        parts=[types.Part(text=text_val)],
+                                        parts=[types.Part(text=item["data"])],
                                     ),
                                     turn_complete=True,
                                 )
@@ -200,22 +320,22 @@ async def handle_live_session(websocket: WebSocket):
 
                     async def receive_from_gemini():
                         nonlocal session_handle, should_reconnect
-                        async for response in session.receive():
-                            # 1. Session Resumption Update
+                        async for response in live_session.receive():
+                            # Session resumption handle
                             if response.session_resumption_update:
                                 sru = response.session_resumption_update
                                 if sru.new_handle:
                                     session_handle = sru.new_handle
                                     logger.info("EVENT: resumption_handle_updated | time: %.3f", time.time())
 
-                            # 2. GoAway notification handling
+                            # GoAway
                             if response.go_away:
                                 logger.info("EVENT: go_away_received | time: %.3f", time.time())
                                 await websocket.send_json({"type": "state", "value": "reconnecting"})
                                 should_reconnect = True
                                 break
 
-                            # 3. Server Content
+                            # Server content
                             sc = response.server_content
                             if sc:
                                 if sc.interrupted:
@@ -256,37 +376,86 @@ async def handle_live_session(websocket: WebSocket):
                                     await websocket.send_json({"type": "turn_complete"})
                                     await websocket.send_json({"type": "state", "value": "listening"})
 
-                            # 4. Tool calls
+                            # Tool calls
                             tc = response.tool_call
                             if tc and tc.function_calls:
-                                logger.info("EVENT: tool_call_received | time: %.3f", time.time())
-                                await websocket.send_json({"type": "state", "value": "thinking"})
-                                responses = []
+                                logger.info("EVENT: tool_call_received | count: %d | time: %.3f",
+                                            len(tc.function_calls), time.time())
+                                has_blocking = any(fc.name in ("confirm_profile", "ping") for fc in tc.function_calls)
+                                if has_blocking:
+                                    await websocket.send_json({"type": "state", "value": "thinking"})
+                                tool_responses = []
+
                                 for fc in tc.function_calls:
                                     args = fc.args or {}
-                                    await websocket.send_json({
-                                        "type": "tool_call",
-                                        "name": fc.name,
-                                        "args": args,
-                                        "id": fc.id,
-                                        "timestamp": time.time(),
-                                    })
+                                    fn_name = fc.name
 
-                                    if fc.name == "ping":
-                                        resp_data = {"status": "pong", "message": args.get("message", "pong")}
-                                    else:
-                                        resp_data = {"status": "unsupported_tool"}
+                                    try:
+                                        # Dispatch
+                                        if fn_name == "ping":
+                                            resp_data = handle_ping(args)
+                                            # Only notify browser for ping (visible tool)
+                                            await websocket.send_json({
+                                                "type": "tool_call",
+                                                "name": fn_name,
+                                                "args": args,
+                                                "id": fc.id,
+                                                "timestamp": time.time(),
+                                            })
 
-                                    responses.append(
+                                        elif fn_name == "update_profile":
+                                            resp_data = handle_update_profile(args, session)
+                                            if resp_data.get("ok"):
+                                                # Push profile_update event to browser
+                                                profile_export = {
+                                                    k: v for k, v in session.profile.items()
+                                                    if not k.startswith("_")
+                                                }
+                                                confidence_map = session.profile.get("_confidence", {})
+                                                await session.push("profile_update", {
+                                                    "profile": profile_export,
+                                                    "confidence": confidence_map,
+                                                    "confirmed": session.confirmed,
+                                                })
+                                                # Persist to DB
+                                                _persist_profile(session)
+
+                                        elif fn_name == "confirm_profile":
+                                            resp_data = handle_confirm_profile(args, session)
+                                            if resp_data.get("ok"):
+                                                profile_export = {
+                                                    k: v for k, v in session.profile.items()
+                                                    if not k.startswith("_")
+                                                }
+                                                confidence_map = session.profile.get("_confidence", {})
+                                                await session.push("profile_update", {
+                                                    "profile": profile_export,
+                                                    "confidence": confidence_map,
+                                                    "confirmed": True,
+                                                })
+                                                _persist_profile(session)
+
+                                        else:
+                                            resp_data = {"error": "unknown_tool", "name": fn_name}
+                                    except Exception:
+                                        logger.error("EVENT: tool_execution_error | tool: %s | time: %.3f", fn_name, time.time())
+                                        resp_data = {"error": "execution_failed", "tool": fn_name}
+
+                                    tool_responses.append(
                                         types.FunctionResponse(
-                                            name=fc.name,
+                                            name=fn_name,
                                             id=fc.id,
                                             response=resp_data,
+                                            scheduling=types.FunctionResponseScheduling.SILENT if fn_name == "update_profile" else None,
                                         )
                                     )
 
-                                if responses:
-                                    await session.send_tool_response(function_responses=responses)
+                                if tool_responses:
+                                    await live_session.send_tool_response(
+                                        function_responses=tool_responses
+                                    )
+                                    if not has_blocking:
+                                        await websocket.send_json({"type": "state", "value": "listening"})
 
                     sender_t = asyncio.create_task(send_to_gemini())
                     receiver_t = asyncio.create_task(receive_from_gemini())
@@ -295,11 +464,10 @@ async def handle_live_session(websocket: WebSocket):
                         [sender_t, receiver_t],
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-
                     for t in pending:
                         t.cancel()
 
-            except Exception as e:
+            except Exception:
                 logger.error("EVENT: session_exception | time: %.3f", time.time())
                 if client_disconnected:
                     break
@@ -307,7 +475,10 @@ async def handle_live_session(websocket: WebSocket):
                     should_reconnect = True
                     await asyncio.sleep(0.5)
                 else:
-                    await websocket.send_json({"type": "error", "message": str(e)})
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Session error. Please try again.",
+                    })
                     await websocket.send_json({"type": "state", "value": "error"})
                     break
 
@@ -316,6 +487,9 @@ async def handle_live_session(websocket: WebSocket):
 
     finally:
         reader_task.cancel()
+        # Final profile persistence on disconnect
+        if session.profile:
+            _persist_profile(session)
         logger.info("EVENT: session_closed | time: %.3f", time.time())
         try:
             await websocket.close()

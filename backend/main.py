@@ -1,7 +1,13 @@
 from pathlib import Path
+from datetime import datetime
+from typing import Any, Dict, Optional
+import json
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
 from backend.live import (
     handle_live_session,
     get_gemini_api_key,
@@ -20,8 +26,9 @@ from backend.schema import (
     RecomputeResultSchema,
 )
 from backend.engine import compute_pathways, recompute_pathways
+from backend.session_store import get_session
 
-app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 3")
+app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,6 +37,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Health
+# ──────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health_check():
@@ -53,11 +64,16 @@ def health_check():
 
     return {
         "status": "ok",
-        "phase": 3,
+        "phase": 4,
         "model": model,
         "has_api_key": bool(api_key),
         "db_initialized": db_ready,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Engine endpoints
+# ──────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/pathways", response_model=PathwaysResultSchema)
 def get_pathways_endpoint(payload: PathwaysRequest):
@@ -65,6 +81,7 @@ def get_pathways_endpoint(payload: PathwaysRequest):
         profile=payload.profile,
         constraints=payload.constraints,
     )
+
 
 @app.post("/api/recompute", response_model=RecomputeResultSchema)
 def recompute_pathways_endpoint(payload: RecomputeRequest):
@@ -74,10 +91,117 @@ def recompute_pathways_endpoint(payload: RecomputeRequest):
         constraints=payload.constraints,
     )
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PATCH /api/session/{id}/profile — manual field editing
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ProfilePatchRequest(BaseModel):
+    field: str
+    value: Any
+    actor: str = "manual"   # "manual" | "admin"
+
+
+@app.patch("/api/session/{session_id}/profile")
+def patch_session_profile(session_id: str, payload: ProfilePatchRequest):
+    """
+    Manual field edit (e.g. from the ProfileCard UI).
+    Writes to the in-memory session (if still active) AND persists to edit_log.
+    Every change records old value, new value, and actor.
+    Transcripts are NEVER touched here.
+    """
+    session = get_session(session_id)
+
+    # Attempt to write to the in-memory session if it's alive
+    old_value = None
+    if session:
+        old_value = session.profile.get(payload.field)
+        session.update_field(
+            payload.field,
+            payload.value,
+            source=payload.actor,
+            confidence="stated",
+        )
+
+    # Always persist the edit_log row to the DB
+    now_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Ensure session row exists (for sessions already closed)
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO sessions
+                (id, created_at, language, transcript_json, profile_json,
+                 constraints_json, consent_official_view)
+            VALUES (?, ?, 'en', NULL, '{}', '{}', 0)
+            """,
+            (session_id, now_ts),
+        )
+
+        cur.execute(
+            """
+            INSERT INTO edit_log (session_id, field, old_value, new_value, actor, ts)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                payload.field,
+                json.dumps(old_value, ensure_ascii=False) if old_value is not None else None,
+                json.dumps(payload.value, ensure_ascii=False),
+                payload.actor,
+                now_ts,
+            ),
+        )
+
+        # If in-memory session exists, also update profile_json in DB
+        if session:
+            cur.execute(
+                "UPDATE sessions SET profile_json = ? WHERE id = ?",
+                (session.to_profile_json(), session_id),
+            )
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "field": payload.field,
+        "old_value": old_value,
+        "new_value": payload.value,
+        "actor": payload.actor,
+        "ts": now_ts,
+    }
+
+
+@app.get("/api/session/{session_id}/profile")
+def get_session_profile(session_id: str):
+    """Return current in-memory profile for the given session."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    profile_export = {k: v for k, v in session.profile.items() if not k.startswith("_")}
+    return {
+        "session_id": session_id,
+        "profile": profile_export,
+        "confidence": session.profile.get("_confidence", {}),
+        "confirmed": session.confirmed,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WebSocket
+# ──────────────────────────────────────────────────────────────────────────────
+
 @app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
     await websocket.accept()
     await handle_live_session(websocket)
+
 
 if __name__ == "__main__":
     import uvicorn
