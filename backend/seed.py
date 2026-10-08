@@ -84,6 +84,11 @@ def seed_database():
 
     conn.commit()
     conn.close()
+
+    # 5. Seed sample_profiles (Phase 6)
+    from backend.data.generate_sample_profiles import seed_sample_profiles
+    seed_sample_profiles()
+
     print("Database seeding completed successfully.")
 
 if __name__ == "__main__":

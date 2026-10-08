@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional
+from collections import Counter
 import json
 
 from dotenv import load_dotenv
@@ -28,7 +29,7 @@ from backend.schema import (
 from backend.engine import compute_pathways, recompute_pathways
 from backend.session_store import get_session
 
-app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 5")
+app = FastAPI(title="SIH26097 Live Voice Assistant - Phase 6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,7 +65,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "phase": 5,
+        "phase": 6,
         "model": model,
         "has_api_key": bool(api_key),
         "db_initialized": db_ready,
@@ -249,6 +250,201 @@ def explain_endpoint(payload: ExplainRequest):
         pass
 
     return ExplainResponse(explanation=fallback)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Official View Summary (Phase 6)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/official/summary")
+def get_official_summary(
+    block: Optional[str] = None,
+    trade: Optional[str] = None,
+):
+    """
+    District Official View aggregated statistics computed purely via SQL (FR-64, FR-65).
+    Features:
+    - Pure SQL aggregations (never hardcoded numbers).
+    - Small-cell suppression: groups under 5 merged into 'Other (suppressed)'.
+    - Separate tracking of generated sample profiles vs consented real sessions.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # 1. Filter dropdown options
+    cur.execute("SELECT DISTINCT block FROM sample_profiles ORDER BY block")
+    all_blocks = [r[0] for r in cur.fetchall()]
+
+    cur.execute("SELECT DISTINCT interested_trade FROM sample_profiles ORDER BY interested_trade")
+    all_trades = [r[0] for r in cur.fetchall()]
+
+    # 2. Demand by Trade (with small-cell suppression for groups < 5)
+    query_demand = """
+        SELECT interested_trade, COUNT(*) as cnt
+        FROM sample_profiles
+        WHERE 1=1
+    """
+    params_demand = []
+    if block:
+        query_demand += " AND block = ?"
+        params_demand.append(block)
+    if trade:
+        query_demand += " AND interested_trade = ?"
+        params_demand.append(trade)
+    query_demand += " GROUP BY interested_trade ORDER BY cnt DESC"
+
+    cur.execute(query_demand, params_demand)
+    rows_demand = cur.fetchall()
+
+    demand_by_trade = []
+    suppressed_count = 0
+    for r in rows_demand:
+        tr_name = r["interested_trade"]
+        cnt = r["cnt"]
+        if cnt < 5 and not trade:
+            suppressed_count += cnt
+        else:
+            demand_by_trade.append({
+                "trade": tr_name,
+                "count": cnt,
+                "is_suppressed": False,
+            })
+
+    if suppressed_count > 0:
+        demand_by_trade.append({
+            "trade": "Other (suppressed)",
+            "count": suppressed_count,
+            "is_suppressed": True,
+        })
+
+    # 3. Missing Skill Gaps across filtered population
+    query_skills = "SELECT missing_skills FROM sample_profiles WHERE 1=1"
+    params_skills = []
+    if block:
+        query_skills += " AND block = ?"
+        params_skills.append(block)
+    if trade:
+        query_skills += " AND interested_trade = ?"
+        params_skills.append(trade)
+
+    cur.execute(query_skills, params_skills)
+    skill_counter = Counter()
+    for row in cur.fetchall():
+        ms = row["missing_skills"]
+        if ms:
+            for s in ms.split(","):
+                s_clean = s.strip()
+                if s_clean:
+                    skill_counter[s_clean] += 1
+
+    top_skill_gaps = [
+        {"skill": k.replace("_", " ").title(), "raw_skill": k, "count": v}
+        for k, v in skill_counter.most_common(8)
+    ]
+
+    # 4. Capacity vs Demand
+    query_tc = "SELECT block, trade, SUM(seats) as seats FROM training_centres WHERE 1=1"
+    params_tc = []
+    if block:
+        query_tc += " AND block = ?"
+        params_tc.append(block)
+    if trade:
+        query_tc += " AND trade = ?"
+        params_tc.append(trade)
+    query_tc += " GROUP BY block, trade"
+
+    cur.execute(query_tc, params_tc)
+    seats_map = {(r["block"], r["trade"]): r["seats"] for r in cur.fetchall()}
+
+    query_bt = """
+        SELECT block, interested_trade, COUNT(*) as cnt
+        FROM sample_profiles
+        WHERE 1=1
+    """
+    params_bt = []
+    if block:
+        query_bt += " AND block = ?"
+        params_bt.append(block)
+    if trade:
+        query_bt += " AND interested_trade = ?"
+        params_bt.append(trade)
+    query_bt += " GROUP BY block, interested_trade ORDER BY block, cnt DESC"
+
+    cur.execute(query_bt, params_bt)
+    capacity_table = []
+    for r in cur.fetchall():
+        b = r["block"]
+        t = r["interested_trade"]
+        cnt = r["cnt"]
+        seats = seats_map.get((b, t), 0)
+        gap = cnt - seats
+        capacity_table.append({
+            "block": b,
+            "trade": t,
+            "interested_count": cnt,
+            "seats": seats,
+            "gap": gap,
+            "is_shortfall": gap > 0,
+            "is_suppressed": cnt < 5 and not trade,
+        })
+
+    # Total sample profiles count
+    query_total = "SELECT COUNT(*) FROM sample_profiles WHERE 1=1"
+    params_total = []
+    if block:
+        query_total += " AND block = ?"
+        params_total.append(block)
+    if trade:
+        query_total += " AND interested_trade = ?"
+        params_total.append(trade)
+    cur.execute(query_total, params_total)
+    total_profiles = cur.fetchone()[0]
+
+    # 5. Consented Real Sessions (kept strictly separate & labelled differently)
+    cur.execute("""
+        SELECT id, created_at, language, profile_json
+        FROM sessions
+        WHERE consent_official_view = 1
+        ORDER BY created_at DESC
+    """)
+    consented_rows = cur.fetchall()
+    consented_sessions = []
+    for cr in consented_rows:
+        prof = {}
+        try:
+            if cr["profile_json"]:
+                prof = json.loads(cr["profile_json"])
+        except Exception:
+            pass
+        consented_sessions.append({
+            "session_id_masked": f"{cr['id'][:8]}...",
+            "created_at": cr["created_at"],
+            "education": prof.get("education_level", "Not stated"),
+            "interests": prof.get("interests", []),
+            "skills": prof.get("skills", []),
+            "language": cr["language"] or "en",
+        })
+
+    conn.close()
+
+    return {
+        "filter": {
+            "block": block,
+            "trade": trade,
+        },
+        "available_blocks": all_blocks,
+        "available_trades": all_trades,
+        "sample_data": {
+            "total_profiles": total_profiles,
+            "demand_by_trade": demand_by_trade,
+            "skill_gaps": top_skill_gaps,
+            "capacity": capacity_table,
+        },
+        "consented_sessions": {
+            "total_consented": len(consented_sessions),
+            "sessions": consented_sessions,
+        },
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
